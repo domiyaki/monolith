@@ -347,7 +347,7 @@ public:
 	TSharedPtr<FJsonObject> GetAssetDetails(const FString& PackagePath);
 
 	// --- Find by type ---
-	TArray<FIndexedAsset> FindByType(const FString& AssetClass, int32 Limit = 100, int32 Offset = 0);
+	TArray<FIndexedAsset> FindByType(const FString& AssetClass, int32 Limit = 100, int32 Offset = 0, const FString& ModuleFilter = FString());
 
 	// --- Find references (bidirectional) ---
 	TSharedPtr<FJsonObject> FindReferences(const FString& PackagePath);

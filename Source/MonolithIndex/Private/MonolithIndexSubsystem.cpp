@@ -487,10 +487,10 @@ TSharedPtr<FJsonObject> UMonolithIndexSubsystem::FindReferences(const FString& P
 	return Database->FindReferences(PackagePath);
 }
 
-TArray<FIndexedAsset> UMonolithIndexSubsystem::FindByType(const FString& AssetClass, int32 Limit, int32 Offset)
+TArray<FIndexedAsset> UMonolithIndexSubsystem::FindByType(const FString& AssetClass, int32 Limit, int32 Offset, const FString& ModuleFilter)
 {
 	if (!Database.IsValid() || !Database->IsOpen()) return {};
-	return Database->FindByType(AssetClass, Limit, Offset);
+	return Database->FindByType(AssetClass, Limit, Offset, ModuleFilter);
 }
 
 TSharedPtr<FJsonObject> UMonolithIndexSubsystem::GetStats()

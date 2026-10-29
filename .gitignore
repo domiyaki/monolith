@@ -2,6 +2,17 @@ Binaries/
 Intermediate/
 Saved/
 DerivedDataCache/
+RuntimeData/
+.vs/
+build/
+*.exe
+*.dll
+*.obj
+*.lib
+*.db
+*.sqlite
+*.log
+*.jsonl
 *.pdb
 *.patch_*
 __pycache__/
@@ -27,7 +38,9 @@ Docs/research/
 # Conditional on WITH_COMMONUI; MONOLITH_RELEASE_BUILD=1 compiles it out
 
 # Build tools and proxy binaries — local to dev machine
-Tools/
+Tools/*
+!Tools/MonolithProxy/
+!Tools/MonolithQuery/
 
 # Agent training infrastructure — local to dev machine, not part of core plugin
 Scripts/vfx_training_harness.py

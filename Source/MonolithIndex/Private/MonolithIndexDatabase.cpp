@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 CREATE INDEX IF NOT EXISTS idx_assets_class ON assets(asset_class);
 CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(asset_name);
+CREATE INDEX IF NOT EXISTS idx_assets_class_module ON assets(asset_class, module_name COLLATE NOCASE);
 
 -- Graph nodes (Blueprint nodes, Material expressions, Niagara modules, etc.)
 CREATE TABLE IF NOT EXISTS nodes (
@@ -1644,16 +1645,37 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::GetAssetDetails(const FString& P
 // Find by type
 // ============================================================
 
-TArray<FIndexedAsset> FMonolithIndexDatabase::FindByType(const FString& AssetClass, int32 Limit, int32 Offset)
+TArray<FIndexedAsset> FMonolithIndexDatabase::FindByType(const FString& AssetClass, int32 Limit, int32 Offset, const FString& ModuleFilter)
 {
 	TArray<FIndexedAsset> Result;
 	if (!IsOpen()) return Result;
 
 	FSQLitePreparedStatement Stmt;
-	Stmt.Create(*Database, TEXT("SELECT id, package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified, saved_hash, indexed_at FROM assets WHERE asset_class = ? LIMIT ? OFFSET ?;"));
+	// SQLite NOCASE folds ASCII only. Keep FString comparison for unusual
+	// non-ASCII module identifiers, still filtering BEFORE applying the page.
+	bool bFilterInMemory = false;
+	for (TCHAR Character : ModuleFilter)
+	{
+		if (Character > 127) { bFilterInMemory = true; break; }
+	}
+	const bool bFilterInSQL = !ModuleFilter.IsEmpty() && !bFilterInMemory;
+	// Keep unfiltered queries on the existing class index. Explicit id ordering
+	// makes the previous insertion-order pagination deterministic.
+	const TCHAR* SQL = !bFilterInSQL
+		? TEXT("SELECT id, package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified, saved_hash, indexed_at FROM assets WHERE asset_class = ? ORDER BY id LIMIT ? OFFSET ?;")
+		: TEXT("SELECT id, package_path, asset_name, asset_class, module_name, description, file_size_bytes, last_modified, saved_hash, indexed_at FROM assets WHERE asset_class = ? AND module_name = ? COLLATE NOCASE ORDER BY id LIMIT ? OFFSET ?;");
+	Stmt.Create(*Database, SQL);
 	Stmt.SetBindingValueByIndex(1, AssetClass);
-	Stmt.SetBindingValueByIndex(2, static_cast<int64>(Limit));
-	Stmt.SetBindingValueByIndex(3, static_cast<int64>(Offset));
+	int32 BindingIndex = 2;
+	if (bFilterInSQL)
+	{
+		// FString's previous comparison was case-insensitive; preserve that for
+		// UE module identifiers rather than switching to SQLite's binary equality.
+		Stmt.SetBindingValueByIndex(BindingIndex++, ModuleFilter);
+	}
+	Stmt.SetBindingValueByIndex(BindingIndex++, static_cast<int64>(bFilterInMemory ? -1 : Limit));
+	Stmt.SetBindingValueByIndex(BindingIndex, static_cast<int64>(bFilterInMemory ? 0 : Offset));
+	int64 MatchingRows = 0;
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -1663,6 +1685,12 @@ TArray<FIndexedAsset> FMonolithIndexDatabase::FindByType(const FString& AssetCla
 		Stmt.GetColumnValueByIndex(2, Asset.AssetName);
 		Stmt.GetColumnValueByIndex(3, Asset.AssetClass);
 		Stmt.GetColumnValueByIndex(4, Asset.ModuleName);
+		if (bFilterInMemory)
+		{
+			if (Asset.ModuleName != ModuleFilter) continue;
+			if (MatchingRows++ < FMath::Max(0, Offset)) continue;
+			if (Limit >= 0 && Result.Num() >= Limit) break;
+		}
 		Stmt.GetColumnValueByIndex(5, Asset.Description);
 		Stmt.GetColumnValueByIndex(6, Asset.FileSizeBytes);
 		Stmt.GetColumnValueByIndex(7, Asset.LastModified);
@@ -1685,47 +1713,31 @@ TSharedPtr<FJsonObject> FMonolithIndexDatabase::FindReferences(const FString& Pa
 	int64 AssetId = GetAssetId(PackagePath);
 	if (AssetId < 0) return Result;
 
-	// What this asset depends on
-	TArray<TSharedPtr<FJsonValue>> DepsArr;
-	for (const auto& Dep : GetDependenciesForAsset(AssetId))
+	// Two indexed joins replace one prepared asset lookup per dependency edge.
+	// Do not DISTINCT: repeated edges and different dependency types are data.
+	// The dependency indexes enumerate rowid order; make that order explicit.
+	auto ReadReferences = [this, AssetId](const TCHAR* SQL)
 	{
+		TArray<TSharedPtr<FJsonValue>> Rows;
 		FSQLitePreparedStatement Stmt;
-		Stmt.Create(*Database, TEXT("SELECT package_path, asset_class FROM assets WHERE id = ?;"));
-		Stmt.SetBindingValueByIndex(1, Dep.TargetAssetId);
-		if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+		Stmt.Create(*Database, SQL);
+		Stmt.SetBindingValueByIndex(1, AssetId);
+		while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 		{
-			auto DepObj = MakeShared<FJsonObject>();
-			FString Path, Class;
+			FString Path, Class, Type;
 			Stmt.GetColumnValueByIndex(0, Path);
 			Stmt.GetColumnValueByIndex(1, Class);
-			DepObj->SetStringField(TEXT("path"), Path);
-			DepObj->SetStringField(TEXT("class"), Class);
-			DepObj->SetStringField(TEXT("type"), Dep.DependencyType);
-			DepsArr.Add(MakeShared<FJsonValueObject>(DepObj));
+			Stmt.GetColumnValueByIndex(2, Type);
+			auto Row = MakeShared<FJsonObject>();
+			Row->SetStringField(TEXT("path"), Path);
+			Row->SetStringField(TEXT("class"), Class);
+			Row->SetStringField(TEXT("type"), Type);
+			Rows.Add(MakeShared<FJsonValueObject>(Row));
 		}
-	}
-	Result->SetArrayField(TEXT("depends_on"), DepsArr);
-
-	// What references this asset
-	TArray<TSharedPtr<FJsonValue>> RefsArr;
-	for (const auto& Ref : GetReferencersOfAsset(AssetId))
-	{
-		FSQLitePreparedStatement Stmt;
-		Stmt.Create(*Database, TEXT("SELECT package_path, asset_class FROM assets WHERE id = ?;"));
-		Stmt.SetBindingValueByIndex(1, Ref.SourceAssetId);
-		if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
-		{
-			auto RefObj = MakeShared<FJsonObject>();
-			FString Path, Class;
-			Stmt.GetColumnValueByIndex(0, Path);
-			Stmt.GetColumnValueByIndex(1, Class);
-			RefObj->SetStringField(TEXT("path"), Path);
-			RefObj->SetStringField(TEXT("class"), Class);
-			RefObj->SetStringField(TEXT("type"), Ref.DependencyType);
-			RefsArr.Add(MakeShared<FJsonValueObject>(RefObj));
-		}
-	}
-	Result->SetArrayField(TEXT("referenced_by"), RefsArr);
+		return Rows;
+	};
+	Result->SetArrayField(TEXT("depends_on"), ReadReferences(TEXT("SELECT a.package_path, a.asset_class, d.dependency_type FROM dependencies d JOIN assets a ON a.id = d.target_asset_id WHERE d.source_asset_id = ? ORDER BY d.id;")));
+	Result->SetArrayField(TEXT("referenced_by"), ReadReferences(TEXT("SELECT a.package_path, a.asset_class, d.dependency_type FROM dependencies d JOIN assets a ON a.id = d.source_asset_id WHERE d.target_asset_id = ? ORDER BY d.id;")));
 
 	return Result;
 }

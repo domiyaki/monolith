@@ -1,5 +1,6 @@
 #include "MonolithMaterialModule.h"
 #include "MonolithMaterialActions.h"
+#include "MonolithMaterialClipboard.h"
 #include "MonolithMaterialBulkFillAdapter.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithJsonUtils.h"
@@ -12,6 +13,7 @@ void FMonolithMaterialModule::StartupModule()
 	if (!GetDefault<UMonolithSettings>()->bEnableMaterial) return;
 
 	FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithMaterialClipboard::Register(FMonolithToolRegistry::Get());
 
 	// Phase 5 Step 3 (MCP Ergonomics, 2026-05-11) — register the material adapter.
 	// No WITH_* gate (material editor always-on). Body uses MIC's typed setters
@@ -25,6 +27,7 @@ void FMonolithMaterialModule::StartupModule()
 
 void FMonolithMaterialModule::ShutdownModule()
 {
+	FMonolithMaterialClipboard::Reset();
 	FMonolithMaterialBulkFillAdapter::Unregister();
 	FMonolithToolRegistry::Get().UnregisterNamespace(TEXT("material"));
 }

@@ -694,7 +694,7 @@ void FMonolithBlueprintNodeActions::RegisterActions(FMonolithToolRegistry& Regis
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),         TEXT("Blueprint asset path"))
 			.Required(TEXT("operations"),          TEXT("array"),   TEXT("Array of operation objects: { op, ...params }"))
-			.Optional(TEXT("compile_on_complete"), TEXT("boolean"), TEXT("Compile the Blueprint after all operations complete (default: false)"))
+			.Optional(TEXT("compile_on_complete"), TEXT("boolean"), TEXT("Compile after operations (default: false). compile_success reports actual compiler status; aggregate success includes compilation. executed counts processed entries, including invalid ones; skipped counts unprocessed entries."))
 			.Optional(TEXT("stop_on_error"),       TEXT("boolean"), TEXT("Stop processing on first failed operation (default: false)"))
 			.Optional(TEXT("graph_name"),          TEXT("string"),  TEXT("Default graph for all operations; an op's own graph_name overrides it (default: the EventGraph)"))
 			.Build());
@@ -2328,6 +2328,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
 
+	MonolithBlueprintInternal::FScopedBlueprintReuse BlueprintReuse(AssetPath, BP);
+
 	// Parse operations — handle both EJson::Array (normal) and EJson::String (Claude Code quirk)
 	TArray<TSharedPtr<FJsonValue>> Ops;
 	TSharedPtr<FJsonValue> OpsField = Params->TryGetField(TEXT("operations"));
@@ -2372,7 +2374,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 
 	for (int32 i = 0; i < Ops.Num(); ++i)
 	{
-		TSharedPtr<FJsonObject> Op = Ops[i]->AsObject();
+		TSharedPtr<FJsonObject> Op = Ops[i].IsValid() && Ops[i]->Type == EJson::Object
+			? Ops[i]->AsObject() : nullptr;
 		TSharedRef<FJsonObject> RO = MakeShared<FJsonObject>();
 		RO->SetNumberField(TEXT("index"), i);
 
@@ -2498,6 +2501,9 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 	Final->SetNumberField(TEXT("total"), Ops.Num());
 	Final->SetNumberField(TEXT("succeeded"), Ok);
 	Final->SetNumberField(TEXT("failed"), Fail);
+	Final->SetNumberField(TEXT("executed"), Results.Num());
+	Final->SetNumberField(TEXT("skipped"), Ops.Num() - Results.Num());
+	Final->SetBoolField(TEXT("operations_success"), Fail == 0);
 	Final->SetArrayField(TEXT("results"), Results);
 
 	if (bCompileOnComplete)
@@ -2505,7 +2511,9 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleBatchExecute(const TS
 		TSharedRef<FJsonObject> CompileParams = MakeShared<FJsonObject>();
 		CompileParams->SetStringField(TEXT("asset_path"), AssetPath);
 		FMonolithActionResult CompileResult = FMonolithBlueprintCompileActions::HandleCompileBlueprint(CompileParams);
-		Final->SetBoolField(TEXT("compile_success"), CompileResult.bSuccess);
+		const bool bCompileSuccess = MonolithBlueprintInternal::DidCompileSucceed(CompileResult);
+		Final->SetBoolField(TEXT("compile_success"), bCompileSuccess);
+		Final->SetBoolField(TEXT("success"), Fail == 0 && bCompileSuccess);
 		if (CompileResult.bSuccess && CompileResult.Result.IsValid())
 		{
 			Final->SetObjectField(TEXT("compile_result"), CompileResult.Result);
@@ -2994,6 +3002,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleAddNodesBulk(const TS
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
 
+	MonolithBlueprintInternal::FScopedBlueprintReuse BlueprintReuse(AssetPath, BP);
+
 	// Parse nodes array — handle both EJson::Array (normal) and EJson::String (Claude Code quirk)
 	TArray<TSharedPtr<FJsonValue>> NodesArr;
 	TSharedPtr<FJsonValue> NodesField = Params->TryGetField(TEXT("nodes"));
@@ -3120,6 +3130,8 @@ FMonolithActionResult FMonolithBlueprintNodeActions::HandleConnectPinsBulk(const
 	{
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
+
+	MonolithBlueprintInternal::FScopedBlueprintReuse BlueprintReuse(AssetPath, BP);
 
 	// Parse connections array — handle both EJson::Array and EJson::String (Claude Code quirk)
 	TArray<TSharedPtr<FJsonValue>> ConnArr;

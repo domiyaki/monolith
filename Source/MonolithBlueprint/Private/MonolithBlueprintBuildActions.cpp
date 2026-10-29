@@ -20,7 +20,7 @@ void FMonolithBlueprintBuildActions::RegisterActions(FMonolithToolRegistry& Regi
 		TEXT("Declarative one-shot Blueprint graph builder. Takes a JSON spec and creates variables, components, "
 		     "nodes, connections, and pin defaults in a single transaction. Modeled after build_material_graph. "
 		     "Nodes use caller-defined 'id' fields that are resolved to actual UE node IDs in connections and pin_defaults. "
-		     "Returns a full summary with ID mapping, connection results, and any warnings."),
+		     "Validates section arrays and duplicate node IDs before editing. Returns ID mapping, connection results, warnings, and aggregate success including requested compilation."),
 		FMonolithActionHandler::CreateStatic(&HandleBuildBlueprintFromSpec),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"),   TEXT("Blueprint asset path (must already exist)"))
@@ -93,6 +93,39 @@ namespace
 
 FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSpec(const TSharedPtr<FJsonObject>& Params)
 {
+
+	// Parse once before any edits. Invalid supplied sections must not silently vanish.
+	TMap<FString, TArray<TSharedPtr<FJsonValue>>> Sections;
+	for (const TCHAR* Field : {TEXT("variables"), TEXT("components"), TEXT("nodes"), TEXT("connections"), TEXT("pin_defaults")})
+	{
+		if (!Params->HasField(Field)) continue;
+		TArray<TSharedPtr<FJsonValue>>& Entries = Sections.Add(Field);
+		if (!ParseJsonArray(Params, Field, Entries))
+		{
+			return FMonolithActionResult::Error(FString::Printf(TEXT("'%s' must be an array or a JSON array string; no edits applied"), Field));
+		}
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
+		{
+			if (!Entries[Index].IsValid() || Entries[Index]->Type != EJson::Object)
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("'%s' entry %d must be an object; no edits applied"), Field, Index));
+			}
+		}
+	}
+	if (const TArray<TSharedPtr<FJsonValue>>* Nodes = Sections.Find(TEXT("nodes")))
+	{
+		TSet<FString> Ids;
+		for (const TSharedPtr<FJsonValue>& Node : *Nodes)
+		{
+			const FString Id = GetStr(Node->AsObject(), TEXT("id"));
+			if (!Id.IsEmpty() && Ids.Contains(Id))
+			{
+				return FMonolithActionResult::Error(FString::Printf(TEXT("Duplicate node id '%s'; no edits applied"), *Id));
+			}
+			Ids.Add(Id);
+		}
+	}
+
 	// ---- Load Blueprint ----
 	FString AssetPath;
 	UBlueprint* BP = MonolithBlueprintInternal::LoadBlueprintFromParams(Params, AssetPath);
@@ -101,6 +134,7 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 		return FMonolithActionResult::Error(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
 
+	MonolithBlueprintInternal::FScopedBlueprintReuse BlueprintReuse(AssetPath, BP);
 	FString GraphName = GetStr(Params, TEXT("graph_name"));
 
 	// Verify graph exists early
@@ -111,6 +145,7 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 			TEXT("Graph not found: %s"), GraphName.IsEmpty() ? TEXT("EventGraph") : *GraphName));
 	}
 
+	const FString ResolvedGraphName = Graph->GetName();
 	// ---- Begin transaction ----
 	GEditor->BeginTransaction(NSLOCTEXT("Monolith", "BuildBPFromSpec", "Build Blueprint From Spec"));
 
@@ -146,9 +181,9 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 	//  Phase 1: Variables
 	// ============================================================
 	{
-		TArray<TSharedPtr<FJsonValue>> VarSpecs;
-		if (ParseJsonArray(Params, TEXT("variables"), VarSpecs))
+		if (const TArray<TSharedPtr<FJsonValue>>* Entries = Sections.Find(TEXT("variables")))
 		{
+			const TArray<TSharedPtr<FJsonValue>>& VarSpecs = *Entries;
 			for (int32 i = 0; i < VarSpecs.Num(); ++i)
 			{
 				TSharedPtr<FJsonObject> VarObj = VarSpecs[i]->AsObject();
@@ -185,9 +220,9 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 	//  Phase 2: Components
 	// ============================================================
 	{
-		TArray<TSharedPtr<FJsonValue>> CompSpecs;
-		if (ParseJsonArray(Params, TEXT("components"), CompSpecs))
+		if (const TArray<TSharedPtr<FJsonValue>>* Entries = Sections.Find(TEXT("components")))
 		{
+			const TArray<TSharedPtr<FJsonValue>>& CompSpecs = *Entries;
 			for (int32 i = 0; i < CompSpecs.Num(); ++i)
 			{
 				TSharedPtr<FJsonObject> CompObj = CompSpecs[i]->AsObject();
@@ -230,9 +265,9 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 	//  Phase 3: Nodes
 	// ============================================================
 	{
-		TArray<TSharedPtr<FJsonValue>> NodeSpecs;
-		if (ParseJsonArray(Params, TEXT("nodes"), NodeSpecs))
+		if (const TArray<TSharedPtr<FJsonValue>>* Entries = Sections.Find(TEXT("nodes")))
 		{
+			const TArray<TSharedPtr<FJsonValue>>& NodeSpecs = *Entries;
 			for (int32 i = 0; i < NodeSpecs.Num(); ++i)
 			{
 				TSharedPtr<FJsonObject> NodeObj = NodeSpecs[i]->AsObject();
@@ -319,9 +354,9 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 	//  Phase 4: Connections
 	// ============================================================
 	{
-		TArray<TSharedPtr<FJsonValue>> ConnSpecs;
-		if (ParseJsonArray(Params, TEXT("connections"), ConnSpecs))
+		if (const TArray<TSharedPtr<FJsonValue>>* Entries = Sections.Find(TEXT("connections")))
 		{
+			const TArray<TSharedPtr<FJsonValue>>& ConnSpecs = *Entries;
 			for (int32 i = 0; i < ConnSpecs.Num(); ++i)
 			{
 				TSharedPtr<FJsonObject> ConnObj = ConnSpecs[i]->AsObject();
@@ -391,9 +426,9 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 	//  Phase 5: Pin Defaults
 	// ============================================================
 	{
-		TArray<TSharedPtr<FJsonValue>> PinSpecs;
-		if (ParseJsonArray(Params, TEXT("pin_defaults"), PinSpecs))
+		if (const TArray<TSharedPtr<FJsonValue>>* Entries = Sections.Find(TEXT("pin_defaults")))
 		{
+			const TArray<TSharedPtr<FJsonValue>>& PinSpecs = *Entries;
 			for (int32 i = 0; i < PinSpecs.Num(); ++i)
 			{
 				TSharedPtr<FJsonObject> PinObj = PinSpecs[i]->AsObject();
@@ -467,7 +502,7 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 		TSharedRef<FJsonObject> CompileParams = MakeSubParams(AssetPath);
 		FMonolithActionResult CResult = FMonolithBlueprintCompileActions::HandleCompileBlueprint(CompileParams);
 		bCompiled = true;
-		bCompileSuccess = CResult.bSuccess;
+		bCompileSuccess = MonolithBlueprintInternal::DidCompileSucceed(CResult);
 		CompileResult = CResult.Result;
 
 		if (!CResult.bSuccess)
@@ -481,8 +516,9 @@ FMonolithActionResult FMonolithBlueprintBuildActions::HandleBuildBlueprintFromSp
 	// ============================================================
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("asset_path"), AssetPath);
-	Root->SetStringField(TEXT("graph"), Graph->GetName());
-	Root->SetBoolField(TEXT("success"), Errors == 0);
+	Root->SetStringField(TEXT("graph"), ResolvedGraphName);
+	Root->SetBoolField(TEXT("operations_success"), Errors == 0);
+	Root->SetBoolField(TEXT("success"), Errors == 0 && (!bCompiled || bCompileSuccess));
 
 	// Summary counts
 	TSharedRef<FJsonObject> Summary = MakeShared<FJsonObject>();

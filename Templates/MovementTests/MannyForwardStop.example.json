@@ -1,0 +1,20 @@
+{
+  "map": "/Game/CascadeurLiveLinkBackflipTest/Maps/L_MannyMoverMotionMatching",
+  "duration": 4.0,
+  "capture_interval": 0.25,
+  "pawn_class": "BP_MannyMoverCharacter",
+  "expected_anim_class": "ABP_Manny_Locomotion",
+  "sample_vars": [
+    "MotionMatchingSelection.SelectedAnim",
+    "MotionMatchingSelection.SelectedTime",
+    "MotionMatchingSelection.SelectedDatabase"
+  ],
+  "input_timeline": [
+    {
+      "start_seconds": 0.5,
+      "duration_seconds": 1.4,
+      "input_action": "/Game/CascadeurLiveLinkBackflipTest/Input/IA_MoveForward",
+      "value": 1.0
+    }
+  ]
+}

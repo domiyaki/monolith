@@ -3,11 +3,35 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "UObject/WeakObjectPtr.h"
+#include "UObject/StrongObjectPtr.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
 
 class UWorld;
 class APawn;
 class FMonolithLogCapture;
 class FJsonValue;
+class FJsonObject;
+
+// One declarative Enhanced Input hold. The session owns the action until cleanup.
+struct FPieSmokeInputSegment
+{
+	double StartSeconds = 0.0;
+	double DurationSeconds = 0.0;
+	int32 PlayerIndex = 0;
+	TStrongObjectPtr<UInputAction> Action;
+	FString ActionPath;
+	FInputActionValue Value;
+	double FirstDispatchSeconds = -1.0;
+	double ReleaseSeconds = -1.0;
+	int32 DispatchCount = 0;
+	bool bReleased = false;
+	FString ReleaseReason;
+};
+
+// Strict preflight, before any map load, startup script, or PIE mutation.
+bool ParsePieSmokeInputTimeline(const TSharedPtr<FJsonObject>& Params, double Duration,
+	TArray<FPieSmokeInputSegment>& OutSegments, FString& OutError);
 
 // One timestamped sample of the named AnimInstance variables on the tracked pawn.
 // Values are stored loosely (float OR bool) keyed by the variable name; the poll
@@ -24,6 +48,14 @@ struct FPieSmokeSample
 {
 	double TimeSeconds = 0.0; // seconds since the session's marker
 	TArray<FPieSmokeSampleVar> Vars;
+	TArray<TPair<FString, TSharedPtr<FJsonValue>>> ReflectedVars;
+	TArray<FString> MissingVars;
+	bool bHasPawn = false;
+	FVector PawnLocation = FVector::ZeroVector;
+	FRotator PawnRotation = FRotator::ZeroRotator;
+	FVector PawnVelocity = FVector::ZeroVector;
+	bool bHasMeasuredVelocity = false;
+	FVector MeasuredVelocity = FVector::ZeroVector;
 	// Clip variant only: path of the viewport frame captured at this sample (empty otherwise).
 	FString FramePath;
 	// #7 per-frame validity: a captured frame that is all-black or a single uniform colour
@@ -220,6 +252,11 @@ struct FPieSmokeSession
 	double StartTimeSeconds = 0.0;   // FPlatformTime::Seconds() at the marker emit
 	double DurationSeconds = 5.0;
 	double LastObservedSeconds = 0.0;
+	TArray<FPieSmokeInputSegment> InputTimeline;
+	double GameTimeOrigin = -1.0;
+	double GameElapsedSeconds = 0.0;
+	double LastObservedGameTime = -1.0;
+	bool bInputsCleanedUp = false;
 
 	FString Marker;
 	FString MapName;

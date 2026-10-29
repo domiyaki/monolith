@@ -82,6 +82,10 @@ public:
 	static FMonolithActionResult HandleCaptureSystemGif(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleImportTexture(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleGetViewportInfo(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleCaptureCurrentLevelViewport(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleFocusMeshViewport(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleCaptureViewportDiagnosticSet(const TSharedPtr<FJsonObject>& Params);
+	static FMonolithActionResult HandleGetCurrentEditorContext(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleStitchFlipbook(const TSharedPtr<FJsonObject>& Params);
 	static FMonolithActionResult HandleDeleteAssets(const TSharedPtr<FJsonObject>& Params);
 

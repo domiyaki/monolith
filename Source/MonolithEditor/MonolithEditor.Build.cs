@@ -22,6 +22,7 @@ public class MonolithEditor : ModuleRules
 			"UnrealEd",
 			"EditorSubsystem",
 			"PropertyEditor",
+			"Kismet",
 			"Slate",
 			"SlateCore",
 			"Json",
@@ -33,6 +34,7 @@ public class MonolithEditor : ModuleRules
 			"ImageWrapper",
 			"Niagara",
 			"AssetTools",
+			"AssetRegistry", // load_level target metadata preflight; does not load a UWorld
 			"EditorScriptingUtilities",
 			"AdvancedPreviewScene",
 			"ImageCore",

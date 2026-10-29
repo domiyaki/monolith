@@ -1,0 +1,37 @@
+{
+  "title": "认识 Manny 的 Motion Matching 面板",
+  "steps": [
+    {
+      "title": "找到 Blend Time",
+      "instruction": "查看右侧闪烁的 Blend Time 属性行，点击它的名称确认你已找到。这里只练习定位，无需修改数值。点击后会自动进入下一步。",
+      "target": {
+        "asset_path": "/Game/CascadeurLiveLinkBackflipTest/MotionMatching/ABP_Manny_Locomotion",
+        "graph_name": "AnimGraph",
+        "node_id": "AnimGraphNode_MotionMatching_0",
+        "property_path": "Node.BlendTime"
+      },
+      "completion": { "type": "property_clicked" }
+    },
+    {
+      "title": "找到 Pose Reselect History",
+      "instruction": "现在目标换成了 Pose Reselect History。点击这一行的名称，验证工具会按步骤带你到不同属性；无需修改数值。",
+      "target": {
+        "asset_path": "/Game/CascadeurLiveLinkBackflipTest/MotionMatching/ABP_Manny_Locomotion",
+        "graph_name": "AnimGraph",
+        "node_id": "AnimGraphNode_MotionMatching_0",
+        "property_path": "Node.PoseReselectHistory"
+      },
+      "completion": { "type": "property_clicked" }
+    },
+    {
+      "title": "完成定位练习",
+      "instruction": "你已跟随引导找到两个属性。点击引导面板的“检查并继续”完成。本次没有要求修改动画、参数或数据库。以后修改数值的步骤会核对实际值，不能仅靠点击继续跳过。",
+      "target": {
+        "asset_path": "/Game/CascadeurLiveLinkBackflipTest/MotionMatching/ABP_Manny_Locomotion",
+        "graph_name": "AnimGraph",
+        "node_id": "AnimGraphNode_MotionMatching_0"
+      },
+      "completion": { "type": "confirm" }
+    }
+  ]
+}

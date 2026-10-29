@@ -18,6 +18,8 @@ public class MonolithMaterial : ModuleRules
 			"MonolithCore",
 			"UnrealEd",
 			"MaterialEditor",
+			"ApplicationCore",
+			"Projects",
 			"EditorScriptingUtilities",
 			"AssetTools",
 			"RenderCore",

@@ -265,17 +265,15 @@ namespace MonolithBulkFillActionsInternal
 		}
 
 		FMonolithToolRegistry& Reg = FMonolithToolRegistry::Get();
-		const TArray<FMonolithActionInfo> Actions = Reg.GetActions(TargetNamespace);
-		const FMonolithActionInfo* Found = Actions.FindByPredicate(
-			[&ActionName](const FMonolithActionInfo& Info){ return Info.Action == ActionName; });
-
-		if (!Found)
+		FMonolithActionInfo FoundInfo;
+		if (!Reg.TryGetActionInfo(TargetNamespace, ActionName, FoundInfo))
 		{
 			return FMonolithActionResult::Error(FString::Printf(
 				TEXT("action '%s' not found in namespace '%s'. Use monolith_discover(\"%s\") to list available actions."),
 				*ActionName, *TargetNamespace, *TargetNamespace));
 		}
 
+		const FMonolithActionInfo* Found = &FoundInfo;
 		TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
 		Out->SetStringField(TEXT("namespace"), Found->Namespace);
 		Out->SetStringField(TEXT("action"), Found->Action);

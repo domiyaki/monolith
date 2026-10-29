@@ -5,6 +5,9 @@
 #include "Editor.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Engine/LocalPlayer.h"
+#include "EnhancedInputSubsystems.h"
+#include "Kismet/GameplayStatics.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Character.h" // Gap 9: ACharacter::Jump provocation
 #include "GameFramework/PlayerController.h"
@@ -13,6 +16,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Animation/AnimInstance.h"
 #include "Dom/JsonValue.h" // Gap 9: timeseries sample JSON values
+#include "Dom/JsonObject.h"
 #include "EngineUtils.h"
 
 // Phase 8 (OG-E2/E5): structured actor_setup execution against the live PIE world.
@@ -43,8 +47,148 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogMonolithPieSmoke, Log, All);
 
+bool ParsePieSmokeInputTimeline(const TSharedPtr<FJsonObject>& Params, double Duration,
+	TArray<FPieSmokeInputSegment>& OutSegments, FString& OutError)
+{
+	if (!Params->HasField(TEXT("input_timeline"))) { return true; }
+	// Validate the original number too: the caller's legacy clamp can turn infinity into 120.
+	double RequestedDuration = Duration;
+	if (Params->HasField(TEXT("duration")) &&
+		(!Params->TryGetNumberField(TEXT("duration"), RequestedDuration) ||
+		 !FMath::IsFinite(RequestedDuration) || RequestedDuration <= 0.0 || RequestedDuration > 120.0))
+	{
+		OutError = TEXT("input_timeline duration must be a finite number greater than 0 and at most 120 seconds");
+		return false;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+	if (!Params->TryGetArrayField(TEXT("input_timeline"), Items) || !Items || Items->Num() > 128)
+	{
+		OutError = TEXT("input_timeline must be an array of at most 128 segments");
+		return false;
+	}
+	if (!FMath::IsFinite(Duration) || Duration <= 0.0)
+	{
+		OutError = TEXT("input_timeline requires a finite positive session duration");
+		return false;
+	}
+	for (int32 Index = 0; Index < Items->Num(); ++Index)
+	{
+		const auto Fail = [&OutError, Index](const FString& Why)
+		{
+			OutError = FString::Printf(TEXT("input_timeline[%d]: %s"), Index, *Why);
+			return false;
+		};
+		const TSharedPtr<FJsonValue>& Item = (*Items)[Index];
+		if (!Item.IsValid() || Item->Type != EJson::Object) { return Fail(TEXT("expected an object")); }
+		const TSharedPtr<FJsonObject> Obj = Item->AsObject();
+		FPieSmokeInputSegment Segment;
+		if (!Obj->TryGetNumberField(TEXT("start_seconds"), Segment.StartSeconds) ||
+			!Obj->TryGetNumberField(TEXT("duration_seconds"), Segment.DurationSeconds) ||
+			!FMath::IsFinite(Segment.StartSeconds) || !FMath::IsFinite(Segment.DurationSeconds) ||
+			Segment.StartSeconds < 0.0 || Segment.DurationSeconds <= 0.0 ||
+			Segment.StartSeconds + Segment.DurationSeconds > Duration)
+		{
+			return Fail(TEXT("start_seconds must be nonnegative and duration_seconds positive; segment must fit inside session duration"));
+		}
+		double Player = 0.0;
+		if (Obj->HasField(TEXT("player_index")) &&
+			(!Obj->TryGetNumberField(TEXT("player_index"), Player) || !FMath::IsFinite(Player) ||
+			 Player < 0.0 || Player > 255.0 || FMath::FloorToDouble(Player) != Player))
+		{
+			return Fail(TEXT("player_index must be an integer from 0 to 255"));
+		}
+		Segment.PlayerIndex = static_cast<int32>(Player);
+		FString Path;
+		if (!Obj->TryGetStringField(TEXT("input_action"), Path) || !Path.StartsWith(TEXT("/")))
+		{
+			return Fail(TEXT("input_action must be a full asset path; short-name first-match resolution is not used"));
+		}
+		UInputAction* Action = LoadObject<UInputAction>(nullptr, *Path);
+		if (!Action) { return Fail(FString::Printf(TEXT("InputAction not found: %s"), *Path)); }
+		Segment.Action.Reset(Action);
+		Segment.ActionPath = Action->GetPathName();
+		const TSharedPtr<FJsonValue> Value = Obj->TryGetField(TEXT("value"));
+		if (!Value.IsValid()) { return Fail(TEXT("value is required")); }
+		if (Value->Type == EJson::Boolean)
+		{
+			Segment.Value = FInputActionValue(Value->AsBool());
+		}
+		else if (Value->Type == EJson::Number && FMath::IsFinite(Value->AsNumber()) &&
+			FMath::Abs(Value->AsNumber()) <= static_cast<double>(MAX_flt))
+		{
+			Segment.Value = FInputActionValue(static_cast<float>(Value->AsNumber()));
+		}
+		else if (Value->Type == EJson::Array)
+		{
+			const auto& Components = Value->AsArray();
+			if (Components.Num() != 2 && Components.Num() != 3) { return Fail(TEXT("value array must have 2 or 3 components")); }
+			for (const auto& Component : Components)
+			{
+				if (!Component.IsValid() || Component->Type != EJson::Number ||
+					!FMath::IsFinite(Component->AsNumber()) || FMath::Abs(Component->AsNumber()) > static_cast<double>(MAX_flt))
+				{
+					return Fail(TEXT("value components must be finite numbers representable as floats"));
+				}
+			}
+			Segment.Value = Components.Num() == 2
+				? FInputActionValue(FVector2D(Components[0]->AsNumber(), Components[1]->AsNumber()))
+				: FInputActionValue(FVector(Components[0]->AsNumber(), Components[1]->AsNumber(), Components[2]->AsNumber()));
+		}
+		else { return Fail(TEXT("value must be a bool, finite number, array[2], or array[3]")); }
+		if (Segment.Value.GetValueType() != Action->ValueType)
+		{
+			return Fail(TEXT("value shape must match InputAction ValueType (Boolean, Axis1D, Axis2D, Axis3D)"));
+		}
+		for (const FPieSmokeInputSegment& Previous : OutSegments)
+		{
+			if (Previous.PlayerIndex == Segment.PlayerIndex && Previous.ActionPath == Segment.ActionPath &&
+				Segment.StartSeconds < Previous.StartSeconds + Previous.DurationSeconds &&
+				Previous.StartSeconds < Segment.StartSeconds + Segment.DurationSeconds)
+			{
+				return Fail(TEXT("overlapping segments for the same player and action are ambiguous"));
+			}
+		}
+		OutSegments.Add(MoveTemp(Segment));
+	}
+	return true;
+}
+
 namespace
 {
+	UEnhancedInputLocalPlayerSubsystem* TimelineSubsystem(UWorld* World, int32 PlayerIndex)
+	{
+		APlayerController* PC = World ? UGameplayStatics::GetPlayerController(World, PlayerIndex) : nullptr;
+		return PC ? ULocalPlayer::GetSubsystemFromController<UEnhancedInputLocalPlayerSubsystem>(PC) : nullptr;
+	}
+
+	void ReleaseTimelineSegment(FPieSmokeInputSegment& Segment, UWorld* World, double Time, const FString& Reason)
+	{
+		if (Segment.bReleased) { return; }
+		if (Segment.DispatchCount > 0 && Segment.Action.IsValid())
+		{
+			if (UEnhancedInputLocalPlayerSubsystem* Subsystem = TimelineSubsystem(World, Segment.PlayerIndex))
+			{
+				FInputActionValue Zero = Segment.Value;
+				Zero.Reset();
+				Subsystem->InjectInputForAction(Segment.Action.Get(), Zero, {}, {});
+			}
+		}
+		Segment.bReleased = true;
+		Segment.ReleaseSeconds = Time;
+		Segment.ReleaseReason = Segment.DispatchCount > 0 ? Reason : TEXT("not_dispatched");
+	}
+
+	void CleanupTimeline(FPieSmokeSession& Session, UWorld* World, const FString& Reason)
+	{
+		if (Session.bInputsCleanedUp) { return; }
+		for (FPieSmokeInputSegment& Segment : Session.InputTimeline)
+		{
+			ReleaseTimelineSegment(Segment, World, Session.GameElapsedSeconds, Reason);
+			Segment.Action.Reset();
+		}
+		Session.bInputsCleanedUp = true;
+	}
+
 	// Locate the active PIE world context's UWorld (or nullptr). Self-contained copy
 	// of the actions-module helper so the manager carries no cross-TU dependency.
 	UWorld* FindActivePieWorld()
@@ -905,6 +1049,7 @@ int32 FPieSmokeSessionManager::Stop(const FString& SessionId)
 				S.Status = EPieSmokeStatus::Stopped;
 				S.bStoppedByTool = true; // #11 lifecycle => stopped-by-tool
 				S.LastObservedSeconds = FPlatformTime::Seconds();
+				CleanupTimeline(S, FindActivePieWorld(), TEXT("stopped"));
 				StopSessionProfiling(S); // Phase 9: finally — flush on the tool-driven stop path.
 				++Stopped;
 			}
@@ -1007,6 +1152,7 @@ void FPieSmokeSessionManager::OnPieEnded(const bool /*bIsSimulating*/)
 	for (TPair<FString, FPieSmokeSession>& Pair : Sessions)
 	{
 		Pair.Value.bPieActive = false;
+		CleanupTimeline(Pair.Value, FindActivePieWorld(), TEXT("pie_ended"));
 		// Phase 9 (OG-E3): finally — the PIE world is going away NOW (incl. on a crash/abort
 		// that fires EndPIE). Flush profiling here too rather than relying on a later observer
 		// tick, so a capture can never outlive the PIE it was bracketing. Idempotent.
@@ -1033,8 +1179,19 @@ bool FPieSmokeSessionManager::OnFrameTick(float /*DeltaTime*/)
 		// PIE gone (ended / crashed / manually stopped) before duration elapsed.
 		if (!S.bPieActive || !PieWorld || !IsValid(PieWorld))
 		{
-			S.Status = EPieSmokeStatus::Complete;
+			S.Status = S.InputTimeline.IsEmpty() ? EPieSmokeStatus::Complete : EPieSmokeStatus::Error;
+			if (!S.InputTimeline.IsEmpty()) { S.ErrorReason = TEXT("PIE ended before the input timeline completed"); }
+			CleanupTimeline(S, PieWorld, TEXT("pie_ended"));
 			StopSessionProfiling(S); // Phase 9: finally — flush on the PIE-gone/abort path.
+			continue;
+		}
+		// A paused or unready world must not retain injected input indefinitely.
+		if (!S.InputTimeline.IsEmpty() && Elapsed > FMath::Max(30.0, S.DurationSeconds * 4.0 + 10.0))
+		{
+			S.Status = EPieSmokeStatus::Error;
+			S.ErrorReason = TEXT("input timeline exceeded wall-clock watchdog (world paused, stalled, or target unavailable)");
+			CleanupTimeline(S, PieWorld, TEXT("watchdog"));
+			StopSessionProfiling(S);
 			continue;
 		}
 
@@ -1044,12 +1201,60 @@ bool FPieSmokeSessionManager::OnFrameTick(float /*DeltaTime*/)
 			continue;
 		}
 		S.bReady = true;
+		if (!S.InputTimeline.IsEmpty())
+		{
+			if (S.GameTimeOrigin < 0.0)
+			{
+				APlayerController* SampleController = UGameplayStatics::GetPlayerController(PieWorld, S.InputTimeline[0].PlayerIndex);
+				APawn* Pawn = SampleController ? SampleController->GetPawn() : nullptr;
+				if (Pawn && !S.PawnClassFilter.IsEmpty() && !Pawn->GetClass()->GetName().Contains(S.PawnClassFilter))
+				{
+					S.Status = EPieSmokeStatus::Error;
+					S.ErrorReason = TEXT("input timeline controlled pawn does not match pawn_class; refusing to sample a different actor");
+					CleanupTimeline(S, PieWorld, TEXT("target_mismatch"));
+					StopSessionProfiling(S);
+					continue;
+				}
+				bool bInputReady = Pawn != nullptr;
+				if (!S.Identity.ExpectedAnimClass.IsEmpty())
+				{
+					bInputReady = bInputReady && PawnAnimInstance(Pawn) != nullptr;
+				}
+				for (const FPieSmokeInputSegment& Segment : S.InputTimeline)
+				{
+					bInputReady = bInputReady && TimelineSubsystem(PieWorld, Segment.PlayerIndex) != nullptr;
+				}
+				if (!bInputReady) { continue; }
+				S.TargetPawn = Pawn;
+				S.GameTimeOrigin = PieWorld->GetTimeSeconds();
+			}
+			APlayerController* SampleController = UGameplayStatics::GetPlayerController(PieWorld, S.InputTimeline[0].PlayerIndex);
+			if (!SampleController || !S.TargetPawn.IsValid() || SampleController->GetPawn() != S.TargetPawn.Get())
+			{
+				S.Status = EPieSmokeStatus::Error;
+				S.ErrorReason = TEXT("input timeline controlled pawn changed or became unavailable");
+				CleanupTimeline(S, PieWorld, TEXT("target_changed"));
+				StopSessionProfiling(S);
+				continue;
+			}
+			const double WorldTime = PieWorld->GetTimeSeconds();
+			// Core ticker can run while the game is paused: never inject twice into one simulation frame.
+			if (WorldTime <= S.LastObservedGameTime) { continue; }
+			S.LastObservedGameTime = WorldTime;
+			S.GameElapsedSeconds = FMath::Max(0.0, WorldTime - S.GameTimeOrigin);
+		}
 
 		AdvanceSession(S);
 
-		if (Elapsed >= S.DurationSeconds)
+		if (S.Status == EPieSmokeStatus::Error)
+		{
+			CleanupTimeline(S, PieWorld, TEXT("error"));
+			StopSessionProfiling(S);
+		}
+		else if ((S.InputTimeline.IsEmpty() ? Elapsed : S.GameElapsedSeconds) >= S.DurationSeconds)
 		{
 			S.Status = EPieSmokeStatus::Complete;
+			CleanupTimeline(S, PieWorld, TEXT("completed"));
 			StopSessionProfiling(S); // Phase 9: finally — flush on the normal-completion path.
 		}
 	}
@@ -1090,7 +1295,46 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 		Session.TargetPawn = Pawn;
 	}
 
-	const double SampleTime = FPlatformTime::Seconds() - Session.StartTimeSeconds;
+	const double SampleTime = Session.InputTimeline.IsEmpty()
+		? FPlatformTime::Seconds() - Session.StartTimeSeconds : Session.GameElapsedSeconds;
+	// Resolve and validate runtime identity before dispatching any requested input.
+	UpdateRuntimeIdentity(Session.Identity, Pawn);
+	UAnimInstance* CurrentAnim = PawnAnimInstance(Pawn);
+	if (!Session.InputTimeline.IsEmpty() && !Session.Identity.ExpectedAnimClass.IsEmpty() &&
+		(!CurrentAnim || !CurrentAnim->GetClass()->GetPathName().Contains(Session.Identity.ExpectedAnimClass) ||
+		 !Session.Identity.bExpectedChecked || Session.Identity.bExpectedMismatch))
+	{
+		Session.Status = EPieSmokeStatus::Error;
+		Session.ErrorReason = TEXT("input timeline expected_anim_class does not match the controlled pawn's animation class");
+		return;
+	}
+	for (FPieSmokeInputSegment& Segment : Session.InputTimeline)
+	{
+		if (!Segment.bReleased && SampleTime >= Segment.StartSeconds + Segment.DurationSeconds)
+		{
+			ReleaseTimelineSegment(Segment, PieWorld, SampleTime, TEXT("segment_completed"));
+			if (Segment.DispatchCount == 0)
+			{
+				Session.Status = EPieSmokeStatus::Error;
+				Session.ErrorReason = TEXT("A timeline segment elapsed between simulation frames without dispatch; increase segment duration");
+				return;
+			}
+		}
+	}
+	for (FPieSmokeInputSegment& Segment : Session.InputTimeline)
+	{
+		if (Segment.bReleased || SampleTime < Segment.StartSeconds) { continue; }
+		UEnhancedInputLocalPlayerSubsystem* Subsystem = TimelineSubsystem(PieWorld, Segment.PlayerIndex);
+		if (!Subsystem || !Segment.Action.IsValid())
+		{
+			Session.Status = EPieSmokeStatus::Error;
+			Session.ErrorReason = TEXT("input timeline lost its local player subsystem or action");
+			return;
+		}
+		Subsystem->InjectInputForAction(Segment.Action.Get(), Segment.Value, {}, {});
+		if (Segment.DispatchCount == 0) { Segment.FirstDispatchSeconds = SampleTime; }
+		++Segment.DispatchCount;
+	}
 	++Session.ObserverTickCount; // #8 AfterNTicks gate
 
 	// Phase 9 (OG-E3): start session-scoped profiling ONCE on the first ready tick. AdvanceSession
@@ -1103,10 +1347,6 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 		Session.bProfilingStarted = true;
 		StartSessionProfiling(Session);
 	}
-
-	// #9 refresh the runtime-identity snapshot from the live pawn (cached first tick,
-	// re-checked each tick for anim_class_changed + the expected-class assert).
-	UpdateRuntimeIdentity(Session.Identity, Pawn);
 
 	// Phase 8 (OG-E2/E5): execute the declarative actor_setup spec ONCE, on the first ready
 	// tick (the observer only reaches AdvanceSession after HasBegunPlay, so this is post-
@@ -1253,17 +1493,42 @@ void FPieSmokeSessionManager::AdvanceSession(FPieSmokeSession& Session)
 		return; // timeseries sessions do not run the flat-var / clip sampling below
 	}
 
+	if (!Session.InputTimeline.IsEmpty() && Session.Samples.Num() >= 16384)
+	{
+		Session.Status = EPieSmokeStatus::Error;
+		Session.ErrorReason = TEXT("input timeline reached the 16384-sample limit; shorten the session or reduce simulation frame rate");
+		return;
+	}
 	FPieSmokeSample Sample;
 	Sample.TimeSeconds = SampleTime;
+	if (!CurrentAnim) { Sample.MissingVars = Session.SampleVarNames; }
 
 	if (Pawn)
 	{
+		Sample.bHasPawn = true;
+		Sample.PawnLocation = Pawn->GetActorLocation();
+		Sample.PawnRotation = Pawn->GetActorRotation();
+		Sample.PawnVelocity = Pawn->GetVelocity();
+		if (!Session.Samples.IsEmpty())
+		{
+			const FPieSmokeSample& Previous = Session.Samples.Last();
+			const double DeltaSeconds = SampleTime - Previous.TimeSeconds;
+			if (Previous.bHasPawn && DeltaSeconds > UE_SMALL_NUMBER)
+			{
+				Sample.bHasMeasuredVelocity = true;
+				Sample.MeasuredVelocity = (Sample.PawnLocation - Previous.PawnLocation) / DeltaSeconds;
+			}
+		}
 		if (USkeletalMeshComponent* SkelComp = Pawn->FindComponentByClass<USkeletalMeshComponent>())
 		{
 			if (UAnimInstance* Anim = SkelComp->GetAnimInstance())
 			{
 				for (const FString& VarName : Session.SampleVarNames)
 				{
+					FString TypeName;
+					TSharedPtr<FJsonValue> Reflected = MonolithPieObject::ReadDottedValue(Anim, VarName, TypeName);
+					if (Reflected.IsValid()) { Sample.ReflectedVars.Emplace(VarName, Reflected); }
+					else { Sample.MissingVars.Add(VarName); }
 					FPieSmokeSampleVar Var;
 					if (ReadAnimVar(Anim, VarName, Var))
 					{

@@ -1,9 +1,17 @@
 #include "MonolithEditorActions.h"
+#include "MonolithAssetOperationValidation.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithParamSchema.h"
 #include "EditorAssetLibrary.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+#include "IMaterialEditor.h"
+#include "MaterialEditor/MaterialEditorInstanceConstant.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialFunctionInterface.h"
+#include "Materials/MaterialFunctionInstance.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -34,6 +42,7 @@
 #include "IImageWrapper.h"
 #include "ImageUtils.h"
 #include "AssetToolsModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "IAssetTools.h"
 #include "AutomatedAssetImportData.h"
 #include "Engine/Texture2D.h"
@@ -75,6 +84,7 @@
 #include "PythonScriptTypes.h"
 #include "LevelEditorSubsystem.h"
 #include "Editor.h"
+#include "Engine/Selection.h"
 
 // run_console_command needs world / PC access
 #include "Engine/World.h"
@@ -113,6 +123,8 @@
 
 // create_nav_harness_map: actor spawning + reflective property set + registry dispatch
 #include "Engine/StaticMeshActor.h"
+#include "EngineUtils.h"
+#include "Components/PrimitiveComponent.h"
 #include "Camera/CameraActor.h"
 #include "Engine/TargetPoint.h"
 #include "GameFramework/Actor.h"
@@ -555,7 +567,8 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Required(TEXT("packages"), TEXT("array"), TEXT("Array of long package names (e.g. [\"/Game/Tests/Monolith/DA_Foo\"]) to save."))
 			.Optional(TEXT("fail_on_unrequested_dirty"), TEXT("bool"), TEXT("If true, abort (saving nothing) when a dirty package outside the request set is found. Default false."), TEXT("false"))
 			.Optional(TEXT("scope_paths"), TEXT("array"), TEXT("Path prefixes that bound the unrequested-dirty pre-scan (only used with fail_on_unrequested_dirty). Omit to scan all dirty packages."))
-			.Optional(TEXT("dry_run"), TEXT("bool"), TEXT("If true, report which packages WOULD be saved (per-package would_save status) without writing anything to disk. Default false."), TEXT("false"))
+			.Optional(TEXT("dry_run"), TEXT("bool"), TEXT("Report the save plan without loading or writing packages. Unloaded packages report an error because their in-memory state is unknown. Default false."), TEXT("false"))
+			.Optional(TEXT("only_dirty"), TEXT("bool"), TEXT("Skip clean packages to avoid redundant saves. Default false preserves explicit saving of clean packages; dry_run follows the same policy."), TEXT("false"))
 			.Build());
 
 	// --- PIE smoke + capture (F2/F3: PIE/profiling harness plan 2026-06-04) ---
@@ -567,7 +580,8 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.OptionalAssetPath(TEXT("map"), TEXT("Level asset path to load before PIE (e.g. /Game/Tests/Monolith/Maps/M_Harness). Omit to use the current editor level."))
 			.Optional(TEXT("marker"), TEXT("string"), TEXT("Marker token emitted to the log; post-marker pattern matching counts only lines after it. Default MONOLITH_SMOKE."), TEXT("MONOLITH_SMOKE"))
 			.Optional(TEXT("duration"), TEXT("number"), TEXT("Seconds the editor loop advances PIE before the session auto-completes (clamped 0-120). Default 5."), TEXT("5"))
-			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance variable names sampled each frame. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
+			.Optional(TEXT("input_timeline"), TEXT("array"), TEXT("Timed Enhanced Input segments [{start_seconds,duration_seconds,input_action:full_asset_path,value,player_index?:0}]. Entire timeline validates before map load or PIE. Holds execute every simulation frame in game time, release automatically, and report actual dispatch/release times. Same-player/action overlaps are rejected. With a nonempty timeline, duration, sample t, captures and probes use game seconds since target/input readiness; wall-clock watchdog bounds paused/stalled runs. Input dispatch queues the next input processing pass; samples observe current state."))
+			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance property names or dotted paths, including MM result leaves. Values appear under samples[].anim_vars; missing paths are reported. Float/bool legacy summaries remain. Pawn location, rotation, API velocity and position-derived velocity are sampled alongside. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
 			.Optional(TEXT("pawn_class"), TEXT("string"), TEXT("Substring of the target pawn's class name to sample (resolves a matching pawn). Omit to use the first player controller's pawn."))
 			.Optional(TEXT("console_script"), TEXT("array"), TEXT("Console command strings run on the PIE world at start (e.g. [\"WalkLoop\"])."))
 			.Optional(TEXT("python_script"), TEXT("string"), TEXT("Python source run via IPythonScriptPlugin at start."))
@@ -610,7 +624,8 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Optional(TEXT("marker"), TEXT("string"), TEXT("Log marker token. Default MONOLITH_CLIP."), TEXT("MONOLITH_CLIP"))
 			.Optional(TEXT("duration"), TEXT("number"), TEXT("Seconds the editor loop advances PIE before the session auto-completes (clamped 0-120). Default 5."), TEXT("5"))
 			.Optional(TEXT("capture_interval"), TEXT("number"), TEXT("Seconds between captured frames (clamped 0.05-5). Default 0.25."), TEXT("0.25"))
-			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance variable names sampled each frame. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
+			.Optional(TEXT("input_timeline"), TEXT("array"), TEXT("Timed Enhanced Input segments [{start_seconds,duration_seconds,input_action:full_asset_path,value,player_index?:0}]. Entire timeline validates before map load or PIE. Holds execute every simulation frame in game time, release automatically, and report actual dispatch/release times. Same-player/action overlaps are rejected. With a nonempty timeline, duration, sample t, captures and probes use game seconds since target/input readiness; wall-clock watchdog bounds paused/stalled runs. Input dispatch queues the next input processing pass; samples observe current state."))
+			.Optional(TEXT("sample_vars"), TEXT("array"), TEXT("AnimInstance property names or dotted paths, including MM result leaves. Values appear under samples[].anim_vars; missing paths are reported. Float/bool legacy summaries remain. Pawn location, rotation, API velocity and position-derived velocity are sampled alongside. Default [GroundSpeed, bShouldMove, DesiredYawDelta]."))
 			.Optional(TEXT("pawn_class"), TEXT("string"), TEXT("Substring of the target pawn's class name to sample. Omit to use the first player controller's pawn."))
 			.Optional(TEXT("console_script"), TEXT("array"), TEXT("Console commands run on the PIE world at start (drive the movement)."))
 			.Optional(TEXT("python_script"), TEXT("string"), TEXT("Python source run at start."))
@@ -660,17 +675,18 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 	// --- Capture actions ---
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_scene_preview"),
-		TEXT("Capture a screenshot of an asset (Niagara, material, static_mesh, skeletal_mesh, widget) rendered in a preview scene"),
+		TEXT("Capture a screenshot of an asset (Niagara, material, static_mesh, skeletal_mesh, blueprint_actor, widget) rendered in a preview scene"),
 		FMonolithActionHandler::CreateStatic(&HandleCaptureScenePreview),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Asset path to preview"))
-			.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara | material | static_mesh | skeletal_mesh | widget"))
+			.Required(TEXT("asset_type"), TEXT("string"), TEXT("niagara | material | static_mesh | skeletal_mesh | blueprint_actor | widget"))
 			.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Mesh for materials: plane, sphere, cube"), TEXT("plane"))
 			.Optional(TEXT("seek_time"), TEXT("number"), TEXT("Advance Niagara sim or skeletal animation to this time (seconds)"), TEXT("0.0"))
 			.OptionalAssetPath(TEXT("animation_path"), TEXT("skeletal_mesh only: UAnimSequence to pose with at seek_time"))
 			.Optional(TEXT("scale"), TEXT("number"), TEXT("widget only: DPI multiplier (>=0.01)"), TEXT("1.0"))
 			.Optional(TEXT("camera"), TEXT("object"), TEXT("{location:[x,y,z], rotation:[p,y,r], fov:60}"))
 			.Optional(TEXT("resolution"), TEXT("array"), TEXT("[width, height]"), TEXT("[512,512]"))
+			.Optional(TEXT("visible_component_substrings"), TEXT("array"), TEXT("blueprint_actor only: render primitive components whose names contain any listed substring (for semantic-region captures)"))
 			.OptionalDiskPath(TEXT("output_path"), TEXT("Output PNG path (absolute or relative to project)"))
 			.Build());
 
@@ -774,17 +790,49 @@ void FMonolithEditorActions::RegisterActions(FMonolithLogCapture* LogCapture)
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("delete_assets"),
-		TEXT("Delete UE assets by path. Optional safety: restrict to allowed path prefixes"),
+		TEXT("Delete UE assets by path. Preflight rejects dirty/open targets, active worlds, resident PIE, and forced Blueprint deletion. Prefix restrictions use package boundaries."),
 		FMonolithActionHandler::CreateStatic(&HandleDeleteAssets),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_paths"), TEXT("array"), TEXT("Array of UE asset paths to delete"))
-			.Optional(TEXT("allowed_prefixes"), TEXT("array"), TEXT("If set, only paths starting with one of these prefixes can be deleted (e.g. [\"/Game/AgentTraining/\"])"))
-			.Optional(TEXT("force"), TEXT("bool"), TEXT("When true, force-delete even if referenced (nulls referencers, including EXTERNAL ones, silently). Default false: soft-delete after closing open asset editors. Use allowed_prefixes as a sandbox when force=true."), TEXT("false"))
+			.Optional(TEXT("allowed_prefixes"), TEXT("array"), TEXT("Non-empty package/folder restrictions, matched at path boundaries on both requested and resolved targets (e.g. [\"/Game/AgentTraining/\"])."))
+			.Optional(TEXT("force"), TEXT("bool"), TEXT("Force-delete non-Blueprint assets even if referenced (nulls external referencers). Blueprint force deletion is rejected due to unload/reinstancing failures. Default false. Save and close target editors first."), TEXT("false"))
 			.Build());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("get_viewport_info"),
 		TEXT("Get current editor viewport camera position, rotation, FOV, and resolution"),
 		FMonolithActionHandler::CreateStatic(&HandleGetViewportInfo),
+		MakeShared<FJsonObject>());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_current_level_viewport"),
+		TEXT("Capture the pixels of the current level-editing viewport exactly as rendered, with camera and frame-integrity metadata"),
+		FMonolithActionHandler::CreateStatic(&HandleCaptureCurrentLevelViewport),
+		FParamSchemaBuilder()
+			.Optional(TEXT("output_path"), TEXT("string"), TEXT("Absolute PNG output path"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("focus_mesh_viewport"),
+		TEXT("Deterministically frame an actor or one of its primitive components in the current level viewport using bounds-relative orbit controls"),
+		FMonolithActionHandler::CreateStatic(&HandleFocusMeshViewport),
+		FParamSchemaBuilder()
+			.Optional(TEXT("target"), TEXT("string"), TEXT("Actor label or object name. Omit to use the selected actor."))
+			.Optional(TEXT("component"), TEXT("string"), TEXT("Primitive component object name. Omit to frame the whole actor."))
+			.Optional(TEXT("distance_multiplier"), TEXT("number"), TEXT("Multiplier applied to the minimum perspective framing distance"), TEXT("1.15"))
+			.Optional(TEXT("elevation_degrees"), TEXT("number"), TEXT("Vertical orbit angle in degrees"), TEXT("0"))
+			.Optional(TEXT("azimuth_degrees"), TEXT("number"), TEXT("Horizontal orbit angle in degrees"), TEXT("0"))
+			.Optional(TEXT("framing_margin"), TEXT("number"), TEXT("Fractional bounds margin; 0.1 adds ten percent"), TEXT("0.1"))
+			.Optional(TEXT("preserve_fov"), TEXT("bool"), TEXT("Preserve the current perspective FOV"), TEXT("true"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("capture_viewport_diagnostic_set"),
+		TEXT("Capture Lit, Unlit, LightingOnly, and Wireframe views from the same current level viewport and restore its original view mode"),
+		FMonolithActionHandler::CreateStatic(&HandleCaptureViewportDiagnosticSet),
+		FParamSchemaBuilder()
+			.Optional(TEXT("output_dir"), TEXT("string"), TEXT("Absolute output directory"))
+			.Build());
+
+	Registry.RegisterAction(TEXT("editor"), TEXT("get_current_editor_context"),
+		TEXT("Get the active Unreal Editor window, dock tab, asset editor, level, viewport, selection, and PIE state"),
+		FMonolithActionHandler::CreateStatic(&HandleGetCurrentEditorContext),
 		MakeShared<FJsonObject>());
 
 	Registry.RegisterAction(TEXT("editor"), TEXT("capture_system_gif"),
@@ -2640,6 +2688,146 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 		CaptureComp->UnregisterComponent();
 		PreviewScene->RemoveComponent(SkelMeshComp);
 	}
+	else if (AssetType.Equals(TEXT("blueprint_actor"), ESearchCase::IgnoreCase))
+	{
+		UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
+		if (!Blueprint || !Blueprint->GeneratedClass || !Blueprint->GeneratedClass->IsChildOf(AActor::StaticClass()))
+		{
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Failed to load actor Blueprint: %s"), *AssetPath));
+		}
+
+		TSharedPtr<FAdvancedPreviewScene> PreviewScene =
+			MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
+		PreviewScene->SetFloorVisibility(false);
+		PreviewScene->SetEnvironmentVisibility(false);
+		UWorld* World = PreviewScene->GetWorld();
+		if (!World)
+		{
+			return FMonolithActionResult::Error(TEXT("Blueprint actor preview scene has no world"));
+		}
+
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.ObjectFlags |= RF_Transient;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AActor* PreviewActor = World->SpawnActor<AActor>(
+			Blueprint->GeneratedClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+		if (!PreviewActor)
+		{
+			return FMonolithActionResult::Error(
+				FString::Printf(TEXT("Failed to spawn actor Blueprint in preview scene: %s"), *AssetPath));
+		}
+		if (Params->HasField(TEXT("visible_component_substrings")))
+		{
+			TArray<FString> VisibleSubstrings;
+			for (const TSharedPtr<FJsonValue>& Value : Params->GetArrayField(TEXT("visible_component_substrings")))
+			{
+				VisibleSubstrings.Add(Value->AsString());
+			}
+			TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents(PreviewActor);
+			for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+			{
+				bool bVisible = VisibleSubstrings.IsEmpty();
+				for (const FString& Substring : VisibleSubstrings)
+				{
+					if (PrimitiveComponent->GetName().Contains(Substring, ESearchCase::IgnoreCase))
+					{
+						bVisible = true;
+						break;
+					}
+				}
+				PrimitiveComponent->SetVisibility(bVisible, true);
+			}
+		}
+
+		World->Tick(ELevelTick::LEVELTICK_PauseTick, 0.0f);
+		World->SendAllEndOfFrameUpdates();
+		FlushRenderingCommands();
+		if (GShaderCompilingManager)
+		{
+			GShaderCompilingManager->FinishAllCompilation();
+		}
+		// Material instances and mesh-slot assignments may have changed while the
+		// Blueprint class was already loaded. Recreate the spawned preview actor's
+		// primitive render states after shader compilation so the capture never
+		// reuses a stale material proxy from an earlier calibration iteration.
+		{
+			TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents(PreviewActor);
+			for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+			{
+				// Resolve StaticMesh slot materials explicitly on this transient actor.
+				// Blueprint CDOs can otherwise retain a render proxy created before an
+				// editor-time slot/instance edit even though OverrideMaterials is empty.
+				if (UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(PrimitiveComponent);
+					StaticMeshComponent && StaticMeshComponent->OverrideMaterials.IsEmpty())
+				{
+					if (UStaticMesh* StaticMesh = StaticMeshComponent->GetStaticMesh())
+					{
+						for (int32 MaterialIndex = 0; MaterialIndex < StaticMesh->GetStaticMaterials().Num(); ++MaterialIndex)
+						{
+							StaticMeshComponent->SetMaterial(MaterialIndex, StaticMesh->GetMaterial(MaterialIndex));
+						}
+					}
+				}
+				PrimitiveComponent->MarkRenderStateDirty();
+			}
+			World->SendAllEndOfFrameUpdates();
+			FlushRenderingCommands();
+		}
+
+		UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		RT->InitAutoFormat(ResX, ResY);
+		RT->ClearColor = FLinearColor(0.18f, 0.18f, 0.18f);
+		RT->UpdateResourceImmediate(true);
+
+		USceneCaptureComponent2D* CaptureComp = NewObject<USceneCaptureComponent2D>(
+			GetTransientPackage(), NAME_None, RF_Transient);
+		CaptureComp->bTickInEditor = false;
+		CaptureComp->SetComponentTickEnabled(false);
+		CaptureComp->SetVisibility(true);
+		CaptureComp->bCaptureEveryFrame = false;
+		CaptureComp->bCaptureOnMovement = false;
+		CaptureComp->TextureTarget = RT;
+		CaptureComp->CaptureSource = ESceneCaptureSource::SCS_FinalToneCurveHDR;
+		CaptureComp->ProjectionType = ECameraProjectionMode::Perspective;
+		CaptureComp->FOVAngle = FOV;
+		CaptureComp->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
+		CaptureComp->RegisterComponentWithWorld(World);
+		CaptureComp->SetWorldLocationAndRotation(CameraLocation, CameraRotation);
+
+		// Capture display-ready RGB first, then capture SceneColorHDR solely for
+		// inverse-opacity alpha. This keeps dark actor materials separable from
+		// the empty black preview background without sacrificing tone mapping.
+		CaptureComp->CaptureScene();
+		FTextureRenderTargetResource* RTResource = RT->GameThread_GetRenderTargetResource();
+		TArray<FColor> FinalPixels;
+		bSuccess = RTResource && RTResource->ReadPixels(FinalPixels) && FinalPixels.Num() == ResX * ResY;
+		if (bSuccess)
+		{
+			CaptureComp->CaptureSource = ESceneCaptureSource::SCS_SceneColorHDR;
+			CaptureComp->CaptureScene();
+			TArray<FColor> AlphaPixels;
+			bSuccess = RTResource->ReadPixels(AlphaPixels) && AlphaPixels.Num() == FinalPixels.Num();
+			if (bSuccess)
+			{
+				for (int32 PixelIndex = 0; PixelIndex < FinalPixels.Num(); ++PixelIndex)
+				{
+					FinalPixels[PixelIndex].A = 255 - AlphaPixels[PixelIndex].A;
+				}
+				IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true);
+				FImage Image;
+				Image.Init(ResX, ResY, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+				FMemory::Memcpy(Image.RawData.GetData(), FinalPixels.GetData(), FinalPixels.Num() * sizeof(FColor));
+				bSuccess = FImageUtils::SaveImageAutoFormat(*OutputPath, Image);
+			}
+		}
+
+		CaptureComp->TextureTarget = nullptr;
+		CaptureComp->UnregisterComponent();
+		PreviewActor->Destroy();
+		World->SendAllEndOfFrameUpdates();
+	}
 	else if (AssetType.Equals(TEXT("widget"), ESearchCase::IgnoreCase))
 	{
 		// Headless / nullrhi / commandlet contexts have no rendering path — bail
@@ -2762,7 +2950,7 @@ FMonolithActionResult FMonolithEditorActions::HandleCaptureScenePreview(
 	{
 		return FMonolithActionResult::Error(
 			FString::Printf(
-				TEXT("Unsupported asset_type: %s (supported: niagara, material, static_mesh, skeletal_mesh, widget)"),
+				TEXT("Unsupported asset_type: %s (supported: niagara, material, static_mesh, skeletal_mesh, blueprint_actor, widget)"),
 				*AssetType));
 	}
 
@@ -3743,222 +3931,446 @@ FMonolithActionResult FMonolithEditorActions::HandleStitchFlipbook(
 	return FMonolithActionResult::Success(Result);
 }
 
-FMonolithActionResult FMonolithEditorActions::HandleGetViewportInfo(
-	const TSharedPtr<FJsonObject>& Params)
+namespace
 {
-	// Get the active level editor viewport
-	FLevelEditorViewportClient* ViewportClient = nullptr;
-	if (GEditor && GEditor->GetLevelViewportClients().Num() > 0)
+	FLevelEditorViewportClient* GetCurrentMonolithLevelViewport(FString& OutError)
 	{
-		ViewportClient = GEditor->GetLevelViewportClients()[0];
+		FLevelEditorViewportClient* Client = GCurrentLevelEditingViewportClient;
+		if (!Client || !Client->Viewport)
+		{
+			OutError = TEXT("No current level-editing viewport. Click the intended Level Editor viewport once and retry.");
+			return nullptr;
+		}
+		const FIntPoint Size = Client->Viewport->GetSizeXY();
+		if (Size.X <= 0 || Size.Y <= 0)
+		{
+			OutError = TEXT("The current level viewport has zero dimensions; it may be hidden or minimized.");
+			return nullptr;
+		}
+		return Client;
 	}
 
-	if (!ViewportClient)
+	TArray<TSharedPtr<FJsonValue>> VectorJson(const FVector& Value)
 	{
-		return FMonolithActionResult::Error(TEXT("No active viewport found"));
+		return { MakeShared<FJsonValueNumber>(Value.X), MakeShared<FJsonValueNumber>(Value.Y), MakeShared<FJsonValueNumber>(Value.Z) };
 	}
 
-	FVector CamLocation = ViewportClient->GetViewLocation();
-	FRotator CamRotation = ViewportClient->GetViewRotation();
-	float FOV = ViewportClient->ViewFOV;
+	TArray<TSharedPtr<FJsonValue>> RotatorJson(const FRotator& Value)
+	{
+		return { MakeShared<FJsonValueNumber>(Value.Pitch), MakeShared<FJsonValueNumber>(Value.Yaw), MakeShared<FJsonValueNumber>(Value.Roll) };
+	}
 
-	FIntPoint ViewportSize = ViewportClient->Viewport->GetSizeXY();
+	bool CaptureLevelViewportToPng(FLevelEditorViewportClient& Client, const FString& InOutputPath,
+		TSharedPtr<FJsonObject>& OutMetadata, FString& OutError)
+	{
+		FViewport* Viewport = Client.Viewport;
+		const FIntPoint Size = Viewport->GetSizeXY();
+		const FVector LocationBefore = Client.GetViewLocation();
+		const FRotator RotationBefore = Client.GetViewRotation();
+
+		Client.Invalidate();
+		Viewport->Draw(false);
+		FlushRenderingCommands();
+		TArray<FColor> Pixels;
+		if (!Viewport->ReadPixels(Pixels) || Pixels.Num() != Size.X * Size.Y)
+		{
+			OutError = TEXT("Failed to read a complete pixel frame from the current level viewport.");
+			return false;
+		}
+
+		uint8 MinChannel = 255;
+		uint8 MaxChannel = 0;
+		for (FColor& Pixel : Pixels)
+		{
+			Pixel.A = 255;
+			MinChannel = FMath::Min(MinChannel, FMath::Min3(Pixel.R, Pixel.G, Pixel.B));
+			MaxChannel = FMath::Max(MaxChannel, FMath::Max3(Pixel.R, Pixel.G, Pixel.B));
+		}
+		const bool bUniformFrame = (MaxChannel - MinChannel) <= 1;
+		const FVector LocationAfter = Client.GetViewLocation();
+		const FRotator RotationAfter = Client.GetViewRotation();
+		const bool bCameraStable = LocationBefore.Equals(LocationAfter, 0.01) && RotationBefore.Equals(RotationAfter, 0.01);
+
+		const FString OutputPath = FPaths::ConvertRelativePathToFull(InOutputPath);
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true);
+		FImage Image;
+		Image.Init(Size.X, Size.Y, ERawImageFormat::BGRA8, EGammaSpace::sRGB);
+		FMemory::Memcpy(Image.RawData.GetData(), Pixels.GetData(), Size.X * Size.Y * sizeof(FColor));
+		if (!FImageUtils::SaveImageAutoFormat(*OutputPath, Image))
+		{
+			OutError = TEXT("Failed to save the current level viewport PNG.");
+			return false;
+		}
+
+		OutMetadata = MakeShared<FJsonObject>();
+		OutMetadata->SetStringField(TEXT("output_path"), OutputPath);
+		OutMetadata->SetNumberField(TEXT("width"), Size.X);
+		OutMetadata->SetNumberField(TEXT("height"), Size.Y);
+		OutMetadata->SetArrayField(TEXT("camera_location"), VectorJson(LocationAfter));
+		OutMetadata->SetArrayField(TEXT("camera_rotation"), RotatorJson(RotationAfter));
+		OutMetadata->SetNumberField(TEXT("fov"), Client.ViewFOV);
+		OutMetadata->SetNumberField(TEXT("view_mode"), static_cast<int32>(Client.GetViewMode()));
+		OutMetadata->SetBoolField(TEXT("camera_stable_during_capture"), bCameraStable);
+		OutMetadata->SetBoolField(TEXT("uniform_frame"), bUniformFrame);
+		OutMetadata->SetBoolField(TEXT("capture_valid"), bCameraStable && !bUniformFrame);
+		return true;
+	}
+
+	AActor* ResolveViewportFocusActor(const TSharedPtr<FJsonObject>& Params, FString& OutError)
+	{
+		FString Target;
+		if (!Params.IsValid() || !Params->TryGetStringField(TEXT("target"), Target) || Target.IsEmpty())
+		{
+			if (GEditor && GEditor->GetSelectedActors())
+			{
+				if (AActor* Selected = GEditor->GetSelectedActors()->GetTop<AActor>()) return Selected;
+			}
+			OutError = TEXT("No target was supplied and no actor is selected.");
+			return nullptr;
+		}
+
+		UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (!World)
+		{
+			OutError = TEXT("No editor world is available.");
+			return nullptr;
+		}
+		AActor* NameMatch = nullptr;
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			if (It->GetActorLabel().Equals(Target, ESearchCase::IgnoreCase)) return *It;
+			if (It->GetName().Equals(Target, ESearchCase::IgnoreCase)) NameMatch = *It;
+		}
+		if (NameMatch) return NameMatch;
+		OutError = FString::Printf(TEXT("No actor with label or object name '%s' exists in the editor world."), *Target);
+		return nullptr;
+	}
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleGetViewportInfo(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Error;
+	FLevelEditorViewportClient* Client = GetCurrentMonolithLevelViewport(Error);
+	if (!Client) return FMonolithActionResult::Error(Error);
+	const FIntPoint Size = Client->Viewport->GetSizeXY();
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("viewport_source"), TEXT("GCurrentLevelEditingViewportClient"));
+	Result->SetNumberField(TEXT("viewport_identity"), static_cast<double>(reinterpret_cast<UPTRINT>(Client)));
+	Result->SetArrayField(TEXT("camera_location"), VectorJson(Client->GetViewLocation()));
+	Result->SetArrayField(TEXT("camera_rotation"), RotatorJson(Client->GetViewRotation()));
+	Result->SetNumberField(TEXT("fov"), Client->ViewFOV);
+	Result->SetNumberField(TEXT("width"), Size.X);
+	Result->SetNumberField(TEXT("height"), Size.Y);
+	Result->SetNumberField(TEXT("view_mode"), static_cast<int32>(Client->GetViewMode()));
+	Result->SetBoolField(TEXT("perspective"), Client->IsPerspective());
+	Result->SetBoolField(TEXT("realtime"), Client->IsRealtime());
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleCaptureCurrentLevelViewport(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Error;
+	FLevelEditorViewportClient* Client = GetCurrentMonolithLevelViewport(Error);
+	if (!Client) return FMonolithActionResult::Error(Error);
+	FString OutputPath;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("output_path"), OutputPath) || OutputPath.IsEmpty())
+	{
+		OutputPath = FPaths::ProjectSavedDir() / TEXT("Screenshots/Monolith") /
+			FString::Printf(TEXT("CurrentLevelViewport_%s.png"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S_%s")));
+	}
+	TSharedPtr<FJsonObject> Result;
+	if (!CaptureLevelViewportToPng(*Client, OutputPath, Result, Error)) return FMonolithActionResult::Error(Error);
+	Result->SetStringField(TEXT("viewport_source"), TEXT("GCurrentLevelEditingViewportClient"));
+	Result->SetNumberField(TEXT("viewport_identity"), static_cast<double>(reinterpret_cast<UPTRINT>(Client)));
+	return FMonolithActionResult::Success(Result);
+}
+
+FMonolithActionResult FMonolithEditorActions::HandleFocusMeshViewport(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Error;
+	FLevelEditorViewportClient* Client = GetCurrentMonolithLevelViewport(Error);
+	if (!Client) return FMonolithActionResult::Error(Error);
+	if (!Client->IsPerspective()) return FMonolithActionResult::Error(TEXT("focus_mesh_viewport requires a perspective level viewport."));
+	AActor* Actor = ResolveViewportFocusActor(Params, Error);
+	if (!Actor) return FMonolithActionResult::Error(Error);
+
+	FVector Center;
+	FVector Extent;
+	FString ComponentName;
+	if (Params.IsValid()) Params->TryGetStringField(TEXT("component"), ComponentName);
+	if (!ComponentName.IsEmpty())
+	{
+		UPrimitiveComponent* Match = nullptr;
+		TInlineComponentArray<UPrimitiveComponent*> Components(Actor);
+		for (UPrimitiveComponent* Component : Components)
+		{
+			if (Component && Component->GetName().Equals(ComponentName, ESearchCase::IgnoreCase)) { Match = Component; break; }
+		}
+		if (!Match) return FMonolithActionResult::Error(FString::Printf(TEXT("Actor '%s' has no primitive component named '%s'."), *Actor->GetActorLabel(), *ComponentName));
+		const FBoxSphereBounds Bounds = Match->Bounds;
+		Center = Bounds.Origin;
+		Extent = Bounds.BoxExtent;
+	}
+	else
+	{
+		Actor->GetActorBounds(false, Center, Extent, true);
+	}
+
+	const double Radius = FMath::Max(Extent.Size(), 1.0);
+	double DistanceMultiplier = 1.15, Elevation = 0.0, Azimuth = 0.0, Margin = 0.1;
+	bool bPreserveFov = true;
+	if (Params.IsValid())
+	{
+		Params->TryGetNumberField(TEXT("distance_multiplier"), DistanceMultiplier);
+		Params->TryGetNumberField(TEXT("elevation_degrees"), Elevation);
+		Params->TryGetNumberField(TEXT("azimuth_degrees"), Azimuth);
+		Params->TryGetNumberField(TEXT("framing_margin"), Margin);
+		Params->TryGetBoolField(TEXT("preserve_fov"), bPreserveFov);
+	}
+	if (!FMath::IsFinite(DistanceMultiplier) || DistanceMultiplier <= 0.0 || !FMath::IsFinite(Margin) || Margin < 0.0)
+		return FMonolithActionResult::Error(TEXT("distance_multiplier must be > 0 and framing_margin must be >= 0."));
+	if (!bPreserveFov) Client->ViewFOV = 60.0f;
+	const FIntPoint ViewportSize = Client->Viewport->GetSizeXY();
+	const double AspectRatio = static_cast<double>(ViewportSize.X) / FMath::Max(ViewportSize.Y, 1);
+	const double HorizontalHalfFov = FMath::DegreesToRadians(FMath::Clamp(static_cast<double>(Client->ViewFOV), 5.0, 170.0) * 0.5);
+	const double VerticalHalfFov = FMath::Atan(FMath::Tan(HorizontalHalfFov) / FMath::Max(AspectRatio, 0.01));
+	const double LimitingHalfFov = FMath::Min(HorizontalHalfFov, VerticalHalfFov);
+	const double Distance = Radius * (1.0 + Margin) / FMath::Sin(LimitingHalfFov) * DistanceMultiplier;
+	const FVector Direction = FRotator(-Elevation, Azimuth, 0.0).Vector();
+	const FVector CameraLocation = Center - Direction * Distance;
+	const FRotator CameraRotation = (Center - CameraLocation).Rotation();
+	Client->SetViewLocation(CameraLocation);
+	Client->SetViewRotation(CameraRotation);
+	Client->Invalidate();
+	Client->Viewport->Draw(false);
+	FlushRenderingCommands();
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetNumberField(TEXT("active_viewport"), 0);
+	Result->SetStringField(TEXT("actor_label"), Actor->GetActorLabel());
+	Result->SetStringField(TEXT("actor_name"), Actor->GetName());
+	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
+	Result->SetArrayField(TEXT("bounds_center"), VectorJson(Center));
+	Result->SetArrayField(TEXT("bounds_extent"), VectorJson(Extent));
+	Result->SetNumberField(TEXT("bounds_radius"), Radius);
+	Result->SetNumberField(TEXT("camera_distance"), Distance);
+	Result->SetArrayField(TEXT("camera_location"), VectorJson(Client->GetViewLocation()));
+	Result->SetArrayField(TEXT("camera_rotation"), RotatorJson(Client->GetViewRotation()));
+	Result->SetNumberField(TEXT("fov"), Client->ViewFOV);
+	Result->SetBoolField(TEXT("framed"), true);
+	return FMonolithActionResult::Success(Result);
+}
 
-	TSharedPtr<FJsonObject> ResObj = MakeShared<FJsonObject>();
-	ResObj->SetNumberField(TEXT("width"), ViewportSize.X);
-	ResObj->SetNumberField(TEXT("height"), ViewportSize.Y);
-	Result->SetObjectField(TEXT("resolution"), ResObj);
-
-	TArray<TSharedPtr<FJsonValue>> LocArr;
-	LocArr.Add(MakeShared<FJsonValueNumber>(CamLocation.X));
-	LocArr.Add(MakeShared<FJsonValueNumber>(CamLocation.Y));
-	LocArr.Add(MakeShared<FJsonValueNumber>(CamLocation.Z));
-	Result->SetArrayField(TEXT("camera_location"), LocArr);
-
-	TArray<TSharedPtr<FJsonValue>> RotArr;
-	RotArr.Add(MakeShared<FJsonValueNumber>(CamRotation.Pitch));
-	RotArr.Add(MakeShared<FJsonValueNumber>(CamRotation.Yaw));
-	RotArr.Add(MakeShared<FJsonValueNumber>(CamRotation.Roll));
-	Result->SetArrayField(TEXT("camera_rotation"), RotArr);
-
-	Result->SetNumberField(TEXT("fov"), FOV);
-	Result->SetBoolField(TEXT("realtime"), ViewportClient->IsRealtime());
-
+FMonolithActionResult FMonolithEditorActions::HandleCaptureViewportDiagnosticSet(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Error;
+	FLevelEditorViewportClient* Client = GetCurrentMonolithLevelViewport(Error);
+	if (!Client) return FMonolithActionResult::Error(Error);
+	FString OutputDir;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("output_dir"), OutputDir) || OutputDir.IsEmpty())
+	{
+		OutputDir = FPaths::ProjectSavedDir() / TEXT("Screenshots/Monolith") /
+			FString::Printf(TEXT("ViewportDiagnostic_%s"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+	}
+	OutputDir = FPaths::ConvertRelativePathToFull(OutputDir);
+	const EViewModeIndex OriginalMode = Client->GetViewMode();
+	struct FDiagnosticMode { const TCHAR* Name; EViewModeIndex Mode; };
+	const FDiagnosticMode Modes[] = {
+		{ TEXT("Lit"), VMI_Lit }, { TEXT("Unlit"), VMI_Unlit },
+		{ TEXT("LightingOnly"), VMI_LightingOnly }, { TEXT("Wireframe"), VMI_Wireframe }
+	};
+	TArray<TSharedPtr<FJsonValue>> Captures;
+	bool bAllValid = true;
+	for (const FDiagnosticMode& Mode : Modes)
+	{
+		Client->SetViewMode(Mode.Mode);
+		TSharedPtr<FJsonObject> Metadata;
+		const FString Path = OutputDir / FString(Mode.Name).Append(TEXT(".png"));
+		if (!CaptureLevelViewportToPng(*Client, Path, Metadata, Error))
+		{
+			Client->SetViewMode(OriginalMode);
+			Client->Invalidate();
+			return FMonolithActionResult::Error(Error);
+		}
+		Metadata->SetStringField(TEXT("name"), Mode.Name);
+		bAllValid &= Metadata->GetBoolField(TEXT("capture_valid"));
+		Captures.Add(MakeShared<FJsonValueObject>(Metadata));
+	}
+	Client->SetViewMode(OriginalMode);
+	Client->Invalidate();
+	Client->Viewport->Draw(false);
+	FlushRenderingCommands();
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("output_dir"), OutputDir);
+	Result->SetArrayField(TEXT("captures"), Captures);
+	Result->SetBoolField(TEXT("all_captures_valid"), bAllValid);
+	Result->SetBoolField(TEXT("original_view_mode_restored"), Client->GetViewMode() == OriginalMode);
 	return FMonolithActionResult::Success(Result);
 }
 
 FMonolithActionResult FMonolithEditorActions::HandleDeleteAssets(
 	const TSharedPtr<FJsonObject>& Params)
 {
-	const TArray<TSharedPtr<FJsonValue>>* AssetPathsArray = nullptr;
-	if (!Params->TryGetArrayField(TEXT("asset_paths"), AssetPathsArray) || !AssetPathsArray || AssetPathsArray->Num() == 0)
-	{
-		return FMonolithActionResult::Error(TEXT("asset_paths array is required and must not be empty"));
-	}
-
-	TArray<FString> AssetPaths;
-	for (const auto& Val : *AssetPathsArray)
+	using namespace MonolithAssetOperationValidation;
+	const TArray<TSharedPtr<FJsonValue>>* Input = nullptr;
+	if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("asset_paths"), Input) || Input->IsEmpty())
+		return FMonolithActionResult::Error(TEXT("asset_paths must be a non-empty array"));
+	TArray<FString> Paths;
+	for (const auto& Value : *Input)
 	{
 		FString Path;
-		if (Val->TryGetString(Path) && !Path.IsEmpty())
-		{
-			AssetPaths.Add(Path);
-		}
+		if (!Value.IsValid() || !Value->TryGetString(Path) ||
+			!FPackageName::IsValidLongPackageName(FPackageName::ObjectPathToPackageName(Path)) || Path.Contains(TEXT(":")))
+			return FMonolithActionResult::Error(TEXT("Every asset_paths entry must be a valid UE package/object path"));
+		Paths.AddUnique(Path);
 	}
-
-	if (AssetPaths.Num() == 0)
+	bool bForce = false;
+	if (Params->HasField(TEXT("force")) && !Params->TryGetBoolField(TEXT("force"), bForce))
+		return FMonolithActionResult::Error(TEXT("force must be a boolean"));
+	TArray<FString> Prefixes;
+	if (Params->HasField(TEXT("allowed_prefixes")))
 	{
-		return FMonolithActionResult::Error(TEXT("No valid paths in asset_paths"));
-	}
-
-	// Optional safety: restrict deletion to allowed prefixes
-	TArray<FString> AllowedPrefixes;
-	const TArray<TSharedPtr<FJsonValue>>* PrefixArray = nullptr;
-	if (Params->TryGetArrayField(TEXT("allowed_prefixes"), PrefixArray) && PrefixArray)
-	{
-		for (const auto& PVal : *PrefixArray)
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Params->TryGetArrayField(TEXT("allowed_prefixes"), Values) || Values->IsEmpty())
+			return FMonolithActionResult::Error(TEXT("allowed_prefixes, when supplied, must be a non-empty array"));
+		for (const auto& Value : *Values)
 		{
 			FString Prefix;
-			if (PVal->TryGetString(Prefix) && !Prefix.IsEmpty())
-			{
-				AllowedPrefixes.Add(Prefix);
-			}
+			if (!Value.IsValid() || !Value->TryGetString(Prefix) || !Prefix.StartsWith(TEXT("/")))
+				return FMonolithActionResult::Error(TEXT("Invalid allowed_prefixes entry"));
+			while (Prefix.EndsWith(TEXT("/"))) Prefix.LeftChopInline(1);
+			if (Prefix.IsEmpty() || Prefix.Contains(TEXT("..")) || Prefix.Contains(TEXT(".")))
+				return FMonolithActionResult::Error(TEXT("allowed_prefixes must contain package/folder paths"));
+			Prefixes.AddUnique(Prefix);
 		}
-	}
-
-	if (AllowedPrefixes.Num() > 0)
-	{
-		for (const FString& Path : AssetPaths)
+		for (const FString& Path : Paths)
 		{
 			bool bAllowed = false;
-			for (const FString& Prefix : AllowedPrefixes)
+			for (const FString& Prefix : Prefixes) bAllowed |= IsWithinDeletePrefix(Path, Prefix);
+			if (!bAllowed) return FMonolithActionResult::Error(FString::Printf(TEXT("Deletion outside allowed prefixes: %s"), *Path));
+		}
+	}
+	if (!GEditor || GIsTransacting)
+		return FMonolithActionResult::Error(TEXT("Deletion requires an editor outside Undo/Redo"));
+	for (const FWorldContext& Context : GEditor->GetWorldContexts())
+		if (Context.WorldType == EWorldType::PIE)
+			return FMonolithActionResult::Error(TEXT("Stop PIE and let teardown finish before deleting assets"));
+
+	TArray<UObject*> Objects;
+	TArray<FString> Missing, Blocked;
+	UAssetEditorSubsystem* Editors = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+	TSet<UObject*> OpenTargets;
+	if (Editors)
+	{
+		TSet<IAssetEditorInstance*> SeenEditors;
+		for (UObject* EditedAsset : Editors->GetAllEditedAssets())
+		{
+			OpenTargets.Add(EditedAsset);
+			for (IAssetEditorInstance* Editor : Editors->FindEditorsForAsset(EditedAsset))
 			{
-				if (Path.StartsWith(Prefix))
+				if (SeenEditors.Contains(Editor)) continue;
+				SeenEditors.Add(Editor);
+				const FName EditorName = Editor->GetEditorName();
+				if (EditorName != TEXT("MaterialEditor") && EditorName != TEXT("MaterialInstanceEditor")) continue;
+				const TArray<UObject*>* EditedObjects = static_cast<IMaterialEditor*>(Editor)->GetObjectsCurrentlyBeingEdited();
+				if (!EditedObjects) continue;
+				for (UObject* Object : *EditedObjects)
 				{
-					bAllowed = true;
-					break;
+					OpenTargets.Add(Object);
+					if (auto* Proxy = Cast<UMaterialEditorInstanceConstant>(Object))
+					{
+						OpenTargets.Add(Proxy->SourceInstance);
+						OpenTargets.Add(Proxy->SourceFunction);
+					}
 				}
 			}
-			if (!bAllowed)
-			{
-				return FMonolithActionResult::Error(FString::Printf(
-					TEXT("Refusing to delete '%s' — not under any allowed prefix. Allowed: %s"),
-					*Path, *FString::Join(AllowedPrefixes, TEXT(", "))));
-			}
 		}
 	}
-
-	// Optional force flag: when true, route through ForceDeleteObjects (nulls
-	// referencers). Default false preserves the conservative soft-delete path.
-	bool bForce = false;
-	Params->TryGetBoolField(TEXT("force"), bForce);
-
-	// Load and delete each asset
-	TArray<UObject*> ObjectsToDelete;
-	TArray<FString> NotFound;
-
-	for (const FString& Path : AssetPaths)
+	TSet<UPackage*> OpenPackages;
+	for (UObject* OpenTarget : OpenTargets)
+		if (IsValid(OpenTarget)) OpenPackages.Add(OpenTarget->GetOutermost());
+	for (const FString& Path : Paths)
 	{
 		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
-		if (Asset)
+		if (!Asset) { Missing.Add(Path); continue; }
+		if (!Prefixes.IsEmpty())
 		{
-			ObjectsToDelete.Add(Asset);
-		}
-		else
-		{
-			NotFound.Add(Path);
-		}
-	}
-
-	// A non-interactive MCP action must NEVER raise a modal Slate dialog: that
-	// blocks the game thread and freezes the in-process MCP HTTP server. The
-	// ObjectTools delete paths can raise TWO classes of modal — a "Save changes?"
-	// prompt on a dirty open asset, and an Error_InUse reference-check dialog
-	// (ObjectTools.cpp:3446) when a target is open in an editor. Both branches
-	// (soft DeleteObjects and hard ForceDeleteObjects) can hit Error_InUse, and
-	// /*bShowConfirmation=*/false does NOT gate it.
-	//
-	// The fix has two halves:
-	//   1. Per-asset preparation (below): clear the package dirty flag so closing
-	//      an open editor cannot trigger a save prompt, then force-close any open
-	//      editors to drop transient editor referencers that would otherwise
-	//      cause the reference check to fail.
-	//   2. A tightly-scoped TGuardValue<bool>(GIsRunningUnattendedScript, true)
-	//      around the delete call only. FMessageDialog::Open
-	//      (MessageDialog.cpp:172) shows UI only when
-	//      !FApp::IsUnattended() && !GIsRunningUnattendedScript; under the guard
-	//      every ObjectTools modal auto-dismisses to its safe default and the
-	//      delete proceeds non-interactively. The guard restores on scope exit.
-	for (UObject* Asset : ObjectsToDelete)
-	{
-		if (UPackage* Pkg = Asset->GetOutermost())
-		{
-			Pkg->SetDirtyFlag(false);
-		}
-		if (GEditor)
-		{
-			if (UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+			bool bResolvedAllowed = false;
+			for (const FString& Prefix : Prefixes)
+				bResolvedAllowed |= IsWithinDeletePrefix(Asset->GetPathName(), Prefix);
+			if (!bResolvedAllowed)
 			{
-				AES->CloseAllEditorsForAsset(Asset);
+				Blocked.Add(Path + TEXT(": resolves outside allowed prefixes to ") + Asset->GetPathName());
+				continue;
 			}
 		}
+		FString Reason;
+		if (!ValidateDeleteTarget(Asset, bForce, Reason))
+		{
+			Blocked.Add(Path + TEXT(": ") + Reason);
+			continue;
+		}
+		if (OpenPackages.Contains(Asset->GetOutermost()) || (Editors && !Editors->FindEditorsForAsset(Asset).IsEmpty()))
+		{
+			Blocked.Add(Path + TEXT(": close its editor after saving or resolving pending edits; no editor was closed by this request"));
+			continue;
+		}
+		bool bActiveWorldPackage = false;
+		for (const FWorldContext& Context : GEditor->GetWorldContexts())
+			if (UWorld* World = Context.World())
+			{
+				bActiveWorldPackage |= World->GetOutermost() == Asset->GetOutermost();
+				for (ULevel* Level : World->GetLevels())
+					if (Level) bActiveWorldPackage |= Level->GetOutermost() == Asset->GetOutermost();
+			}
+		if (bActiveWorldPackage) Blocked.Add(Path + TEXT(": active world/level package; switch away before deletion"));
+		else Objects.AddUnique(Asset);
 	}
+	// Finish the complete preflight before deleting anything. Do not reset dirty
+	// flags or close toolkits: material previews can have unapplied local edits.
+	if (!Blocked.IsEmpty())
+		return FMonolithActionResult::Error(TEXT("Deletion preflight refused; no targets deleted: ") + FString::Join(Blocked, TEXT("; ")));
 
-	// Capture paths BEFORE deletion: the UObject* pointers dangle once the
-	// objects are deleted, so failed_to_delete must be built from these strings.
-	TArray<FString> AttemptedPaths;
-	AttemptedPaths.Reserve(ObjectsToDelete.Num());
-	for (const UObject* Obj : ObjectsToDelete)
+	TArray<FString> Attempted;
+	for (UObject* Asset : Objects) Attempted.Add(Asset->GetPathName());
+	const int32 FoundCount = Objects.Num();
+	int32 Deleted = 0;
+	if (FoundCount > 0)
 	{
-		AttemptedPaths.Add(Obj->GetPathName());
-	}
-
-	int32 NumDeleted = 0;
-	if (ObjectsToDelete.Num() > 0)
-	{
-		// Scope the unattended guard tightly around the synchronous delete call
-		// ONLY so any modal both branches could raise auto-dismisses to its safe
-		// default. The guard restores GIsRunningUnattendedScript on scope exit.
 		TGuardValue<bool> UnattendedGuard(GIsRunningUnattendedScript, true);
-		NumDeleted = bForce
-			? ObjectTools::ForceDeleteObjects(ObjectsToDelete, /*ShowConfirmation=*/false)
-			: ObjectTools::DeleteObjects(ObjectsToDelete, /*bShowConfirmation=*/false);
+		Deleted = bForce ? ObjectTools::ForceDeleteObjects(Objects, false) : ObjectTools::DeleteObjects(Objects, false);
 	}
-
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetBoolField(TEXT("success"), NumDeleted == ObjectsToDelete.Num() && NotFound.Num() == 0);
-	Result->SetNumberField(TEXT("deleted"), NumDeleted);
-	Result->SetNumberField(TEXT("requested"), AssetPaths.Num());
-	Result->SetNumberField(TEXT("found"), ObjectsToDelete.Num());
-
-	// Surface partial failures. The ObjectTools API returns only a count, not
-	// which objects survived, so this is count-derived: when fewer objects were
-	// deleted than were found, report the requested-and-found paths (pass
-	// force=true to delete referenced assets the soft path refuses).
-	if (NumDeleted < ObjectsToDelete.Num())
+	// Never dereference pre-delete objects. Resolve the surviving paths again.
+	TArray<FString> Remaining;
+	for (const FString& Path : Attempted)
+		if (UEditorAssetLibrary::DoesAssetExist(Path)) Remaining.Add(Path);
+	auto Result = MakeShared<FJsonObject>();
+	const bool bSuccess = Deleted == FoundCount && Remaining.IsEmpty() && Missing.IsEmpty();
+	Result->SetBoolField(TEXT("success"), bSuccess);
+	Result->SetNumberField(TEXT("deleted"), Deleted);
+	Result->SetNumberField(TEXT("requested"), Input->Num());
+	Result->SetNumberField(TEXT("unique_requested"), Paths.Num());
+	Result->SetNumberField(TEXT("found"), FoundCount);
+	auto SetPaths = [&](const TCHAR* Field, const TArray<FString>& Items)
 	{
-		TArray<TSharedPtr<FJsonValue>> FailedArr;
-		for (const FString& P : AttemptedPaths)
-		{
-			FailedArr.Add(MakeShared<FJsonValueString>(P));
-		}
-		Result->SetArrayField(TEXT("failed_to_delete"), FailedArr);
-	}
-
-	if (NotFound.Num() > 0)
+		TArray<TSharedPtr<FJsonValue>> Rows;
+		for (const FString& Item : Items) Rows.Add(MakeShared<FJsonValueString>(Item));
+		Result->SetArrayField(Field, Rows);
+	};
+	SetPaths(TEXT("failed_to_delete"), Remaining);
+	SetPaths(TEXT("not_found"), Missing);
+	FMonolithActionResult Outcome = FMonolithActionResult::Success(Result);
+	if (!bSuccess)
 	{
-		TArray<TSharedPtr<FJsonValue>> NotFoundArr;
-		for (const FString& P : NotFound)
-		{
-			NotFoundArr.Add(MakeShared<FJsonValueString>(P));
-		}
-		Result->SetArrayField(TEXT("not_found"), NotFoundArr);
+		Outcome.bSuccess = false;
+		Outcome.ErrorMessage = FString::Printf(TEXT("Deletion incomplete: deleted %d of %d found. Remaining: [%s]. Not found: [%s]. Resolve references; do not escalate automatically to force/Python deletion."),
+			Deleted, FoundCount, *FString::Join(Remaining, TEXT(", ")), *FString::Join(Missing, TEXT(", ")));
+		// Current HTTP error responses omit Result. Preserve all partial-result
+		// fields in the text until Core supports structured error data.
+		FString Details;
+		FJsonSerializer::Serialize(Result, TJsonWriterFactory<>::Create(&Details));
+		Outcome.ErrorMessage += TEXT("\nResult: ") + Details;
 	}
-
-	return FMonolithActionResult::Success(Result);
+	return Outcome;
 }
 
 // ============================================================================
@@ -4481,6 +4893,19 @@ FMonolithActionResult FMonolithEditorActions::HandleLoadLevel(const TSharedPtr<F
 		return FMonolithActionResult::Error(TEXT("GEditor is null — load_level requires editor context."));
 	}
 
+	// Validate from registry metadata before ending PIE or loading a target UWorld.
+	// Loading the world here would itself create the resident-world problem guarded below.
+	const FString TargetPackage = FPackageName::ObjectPathToPackageName(Path);
+	if (!FPackageName::IsValidLongPackageName(TargetPackage) || Path.Contains(TEXT(":")))
+		return FMonolithActionResult::Error(TEXT("load_level requires a valid UE map package/object path"));
+	const FString TargetObjectPath = TargetPackage + TEXT(".") + FPackageName::GetLongPackageAssetName(TargetPackage);
+	if (Path.Contains(TEXT(".")) && Path != TargetObjectPath)
+		return FMonolithActionResult::Error(TEXT("Map object path must identify the package's map asset"));
+	const FAssetData TargetData = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"))
+		.Get().GetAssetByObjectPath(FSoftObjectPath(TargetObjectPath));
+	if (!TargetData.IsValid() || TargetData.AssetClassPath != UWorld::StaticClass()->GetClassPathName())
+		return FMonolithActionResult::Error(FString::Printf(TEXT("Map target is missing or is not a UWorld in the asset registry: %s. No PIE teardown or map change was requested."), *Path));
+
 	ULevelEditorSubsystem* LevelEd = GEditor->GetEditorSubsystem<ULevelEditorSubsystem>();
 	if (!LevelEd)
 	{
@@ -4533,7 +4958,7 @@ FMonolithActionResult FMonolithEditorActions::HandleLoadLevel(const TSharedPtr<F
 	Result->SetBoolField(TEXT("ok"), bLoaded);
 	Result->SetBoolField(TEXT("loaded"), bLoaded);
 	Result->SetStringField(TEXT("path"), Path);
-	if (DirtyWorldPackages.Num() > 0)
+	if (bLoaded && DirtyWorldPackages.Num() > 0)
 	{
 		TArray<TSharedPtr<FJsonValue>> Discarded;
 		for (const FString& PackageName : DirtyWorldPackages)
@@ -4711,16 +5136,25 @@ FMonolithActionResult FMonolithEditorActions::HandleSavePackages(const TSharedPt
 	for (const TSharedPtr<FJsonValue>& Val : *PkgArr)
 	{
 		FString Name;
-		if (Val.IsValid() && Val->TryGetString(Name) && !Name.IsEmpty())
-		{
-			RequestedNames.AddUnique(Name);
-		}
+		FString Filename;
+		if (!Val.IsValid() || !Val->TryGetString(Name) ||
+			!MonolithAssetOperationValidation::TrySaveFilename(Name, FPackageName::GetAssetPackageExtension(), Filename))
+			return FMonolithActionResult::Error(TEXT("Every packages entry must be a valid mounted long package name, not an object or filesystem path"));
+		RequestedNames.AddUnique(Name);
 	}
 	if (RequestedNames.Num() == 0)
 	{
 		return FMonolithActionResult::Error(TEXT("packages array contained no valid package names"));
 	}
 
+	for (const TCHAR* Field : { TEXT("dry_run"), TEXT("only_dirty"), TEXT("fail_on_unrequested_dirty") })
+	{
+		bool Value = false;
+		if (Params->HasField(Field) && !Params->TryGetBoolField(Field, Value))
+			return FMonolithActionResult::Error(FString(Field) + TEXT(" must be a boolean"));
+	}
+	bool bOnlyDirty = false;
+	Params->TryGetBoolField(TEXT("only_dirty"), bOnlyDirty);
 	bool bFailOnUnrequested = false;
 	if (Params.IsValid()) { Params->TryGetBoolField(TEXT("fail_on_unrequested_dirty"), bFailOnUnrequested); }
 
@@ -4755,12 +5189,20 @@ FMonolithActionResult FMonolithEditorActions::HandleSavePackages(const TSharedPt
 
 	TArray<TSharedPtr<FJsonValue>> Rows;
 	int32 SavedCount = 0;
+	int32 CompletedCount = 0;
 	for (const FString& PackageName : RequestedNames)
 	{
 		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
 		Row->SetStringField(TEXT("package"), PackageName);
 
 		UPackage* Package = FindPackage(nullptr, *PackageName);
+		if (!Package && bDryRun)
+		{
+			Row->SetBoolField(TEXT("loaded"), false);
+			Row->SetStringField(TEXT("error"), TEXT("Package is not loaded; dry_run leaves it unloaded and cannot inspect its state"));
+			Rows.Add(MakeShared<FJsonValueObject>(Row));
+			continue;
+		}
 		if (!Package)
 		{
 			Package = LoadPackage(nullptr, *PackageName, LOAD_None);
@@ -4773,38 +5215,61 @@ FMonolithActionResult FMonolithEditorActions::HandleSavePackages(const TSharedPt
 			continue;
 		}
 
+		if (!IsDiskPackage(Package))
+		{
+			Row->SetBoolField(TEXT("saved"), false);
+			Row->SetStringField(TEXT("error"), TEXT("Transient or PIE packages cannot be saved by this action"));
+			Rows.Add(MakeShared<FJsonValueObject>(Row));
+			continue;
+		}
 		const bool bIsMap = Package->ContainsMap();
 		const FString Ext = bIsMap ? FPackageName::GetMapPackageExtension()
 								   : FPackageName::GetAssetPackageExtension();
-		const FString Filename = FPackageName::LongPackageNameToFilename(PackageName, Ext);
+		FString Filename;
+		if (!MonolithAssetOperationValidation::TrySaveFilename(PackageName, Ext, Filename))
+		{
+			Row->SetBoolField(TEXT("saved"), false);
+			Row->SetStringField(TEXT("error"), TEXT("Package no longer resolves to a mounted save path"));
+			Rows.Add(MakeShared<FJsonValueObject>(Row));
+			continue;
+		}
 
 		Row->SetBoolField(TEXT("is_map"), bIsMap);
 		Row->SetStringField(TEXT("disk_path"), Filename);
 
 		if (bDryRun)
 		{
-			// Report intent only — nothing is written. A package "would save" if it is
-			// currently dirty; clean packages are reported as no-op.
-			const bool bWouldSave = Package->IsDirty();
+			// Match the actual save policy, including explicit saving of clean packages.
+			const bool bWouldSave = !bOnlyDirty || Package->IsDirty();
 			Row->SetBoolField(TEXT("would_save"), bWouldSave);
-			Row->SetBoolField(TEXT("dirty"), bWouldSave);
+			Row->SetBoolField(TEXT("dirty"), Package->IsDirty());
+			++CompletedCount;
 			if (bWouldSave) { ++SavedCount; }
 			Rows.Add(MakeShared<FJsonValueObject>(Row));
 			continue;
 		}
 
+		if (bOnlyDirty && !Package->IsDirty())
+		{
+			Row->SetBoolField(TEXT("saved"), false);
+			Row->SetBoolField(TEXT("skipped_clean"), true);
+			++CompletedCount;
+			Rows.Add(MakeShared<FJsonValueObject>(Row));
+			continue;
+		}
 		FSavePackageArgs SaveArgs;
 		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		const bool bSaved = UPackage::SavePackage(Package, nullptr, *Filename, SaveArgs);
 
 		Row->SetBoolField(TEXT("saved"), bSaved);
-		if (bSaved) { ++SavedCount; }
+		if (bSaved) { ++SavedCount; ++CompletedCount; }
 		else { Row->SetStringField(TEXT("error"), TEXT("UPackage::SavePackage returned false")); }
 		Rows.Add(MakeShared<FJsonValueObject>(Row));
 	}
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetBoolField(TEXT("ok"), SavedCount == RequestedNames.Num());
+	Result->SetBoolField(TEXT("ok"), CompletedCount == RequestedNames.Num());
+	Result->SetBoolField(TEXT("only_dirty"), bOnlyDirty);
 	Result->SetBoolField(TEXT("dry_run"), bDryRun);
 	Result->SetNumberField(bDryRun ? TEXT("would_save") : TEXT("saved"), SavedCount);
 	Result->SetNumberField(TEXT("requested"), RequestedNames.Num());
@@ -5444,6 +5909,31 @@ namespace MonolithEditorPieSmoke
 		const double EndTime = (S.Status == EPieSmokeStatus::Running)
 			? FPlatformTime::Seconds() : S.LastObservedSeconds;
 		Root->SetNumberField(TEXT("elapsed_seconds"), FMath::Max(0.0, EndTime - S.StartTimeSeconds));
+		Root->SetStringField(TEXT("sample_time_basis"), S.InputTimeline.IsEmpty() ? TEXT("wall_seconds_since_marker") : TEXT("game_seconds_since_input_ready"));
+		if (!S.InputTimeline.IsEmpty())
+		{
+			Root->SetNumberField(TEXT("game_elapsed_seconds"), S.GameElapsedSeconds);
+			Root->SetNumberField(TEXT("sample_player_index"), S.InputTimeline[0].PlayerIndex);
+			Root->SetNumberField(TEXT("sample_limit"), 16384);
+			Root->SetBoolField(TEXT("inputs_cleaned_up"), S.bInputsCleanedUp);
+			Root->SetStringField(TEXT("input_sampling_order"), TEXT("Input dispatch queues the next Enhanced Input processing pass; samples observe the currently completed simulation state."));
+			TArray<TSharedPtr<FJsonValue>> Timeline;
+			for (const FPieSmokeInputSegment& Segment : S.InputTimeline)
+			{
+				TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+				Entry->SetStringField(TEXT("input_action"), Segment.ActionPath);
+				Entry->SetNumberField(TEXT("player_index"), Segment.PlayerIndex);
+				Entry->SetNumberField(TEXT("start_seconds"), Segment.StartSeconds);
+				Entry->SetNumberField(TEXT("duration_seconds"), Segment.DurationSeconds);
+				Entry->SetNumberField(TEXT("first_dispatch_seconds"), Segment.FirstDispatchSeconds);
+				Entry->SetNumberField(TEXT("release_seconds"), Segment.ReleaseSeconds);
+				Entry->SetNumberField(TEXT("dispatch_count"), Segment.DispatchCount);
+				Entry->SetBoolField(TEXT("released"), Segment.bReleased);
+				Entry->SetStringField(TEXT("release_reason"), Segment.ReleaseReason);
+				Timeline.Add(MakeShared<FJsonValueObject>(Entry));
+			}
+			Root->SetArrayField(TEXT("input_timeline"), Timeline);
+		}
 
 		if (!S.ErrorReason.IsEmpty())
 		{
@@ -5609,6 +6099,36 @@ namespace MonolithEditorPieSmoke
 			{
 				TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
 				SObj->SetNumberField(TEXT("t"), Sample.TimeSeconds);
+				if (Sample.bHasPawn)
+				{
+					const auto VectorJson = [](const FVector& V)
+					{
+						TArray<TSharedPtr<FJsonValue>> Values;
+						Values.Add(MakeShared<FJsonValueNumber>(V.X));
+						Values.Add(MakeShared<FJsonValueNumber>(V.Y));
+						Values.Add(MakeShared<FJsonValueNumber>(V.Z));
+						return Values;
+					};
+					TSharedPtr<FJsonObject> Pawn = MakeShared<FJsonObject>();
+					Pawn->SetArrayField(TEXT("location_cm"), VectorJson(Sample.PawnLocation));
+					Pawn->SetArrayField(TEXT("rotation_pitch_yaw_roll_degrees"), VectorJson(FVector(Sample.PawnRotation.Pitch, Sample.PawnRotation.Yaw, Sample.PawnRotation.Roll)));
+					Pawn->SetArrayField(TEXT("api_velocity_cm_s"), VectorJson(Sample.PawnVelocity));
+					if (Sample.bHasMeasuredVelocity)
+					{
+						Pawn->SetArrayField(TEXT("measured_velocity_cm_s"), VectorJson(Sample.MeasuredVelocity));
+						Pawn->SetNumberField(TEXT("measured_ground_speed_cm_s"), Sample.MeasuredVelocity.Size2D());
+					}
+					SObj->SetObjectField(TEXT("pawn"), Pawn);
+				}
+				TSharedPtr<FJsonObject> Variables = MakeShared<FJsonObject>();
+				for (const auto& Var : Sample.ReflectedVars) { Variables->SetField(Var.Key, Var.Value); }
+				SObj->SetObjectField(TEXT("anim_vars"), Variables);
+				if (!Sample.MissingVars.IsEmpty())
+				{
+					TArray<TSharedPtr<FJsonValue>> Missing;
+					for (const FString& Name : Sample.MissingVars) { Missing.Add(MakeShared<FJsonValueString>(Name)); }
+					SObj->SetArrayField(TEXT("missing_anim_vars"), Missing);
+				}
 				if (!Sample.FramePath.IsEmpty())
 				{
 					SObj->SetStringField(TEXT("frame_path"), Sample.FramePath);
@@ -5827,6 +6347,12 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPieSmoke(const TSharedPtr
 	FString CompileMode = TEXT("refuse");
 	Params->TryGetStringField(TEXT("on_compile_errors"), CompileMode);
 	const bool bSuppressModals = CompileMode.Equals(TEXT("suppress"), ESearchCase::IgnoreCase);
+	FPieSmokeSession Session;
+	FString TimelineError;
+	if (!ParsePieSmokeInputTimeline(Params, Duration, Session.InputTimeline, TimelineError))
+	{
+		return FMonolithActionResult::Error(TimelineError);
+	}
 
 	// Optional map load before PIE.
 	FString LoadError;
@@ -5858,7 +6384,6 @@ FMonolithActionResult FMonolithEditorActions::HandleRunPieSmoke(const TSharedPtr
 	// #8 stage hooks: resolve them now and fire the pre_pie stage SYNCHRONOUSLY before
 	// PIE starts (the rest fire from the observer at their lifecycle moments). Stored on
 	// the session up-front so ApplySmokeParams' ResolveStages is a no-op (idempotent guard).
-	FPieSmokeSession Session;
 	ResolveStages(Params, Session.Stages);
 	FirePrePieStage(Session.Stages);
 
@@ -6209,6 +6734,12 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	double Interval = 0.25;
 	if (Params->HasField(TEXT("capture_interval"))) { Interval = Params->GetNumberField(TEXT("capture_interval")); }
 	Interval = FMath::Clamp(Interval, 0.05, 5.0);
+	FPieSmokeSession Session;
+	FString TimelineError;
+	if (!ParsePieSmokeInputTimeline(Params, Duration, Session.InputTimeline, TimelineError))
+	{
+		return FMonolithActionResult::Error(TimelineError);
+	}
 
 	FString OutputDir;
 	if (Params->HasField(TEXT("output_path")))
@@ -6237,7 +6768,6 @@ FMonolithActionResult FMonolithEditorActions::HandleCapturePieMovementClip(const
 	}
 
 	// #8 resolve stages + fire pre_pie synchronously before PIE start (see HandleRunPieSmoke).
-	FPieSmokeSession Session;
 	ResolveStages(Params, Session.Stages);
 	FirePrePieStage(Session.Stages);
 

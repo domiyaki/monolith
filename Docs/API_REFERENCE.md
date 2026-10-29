@@ -20,7 +20,7 @@ The per-namespace numbers in the Table of Contents and body sections below are k
 |-----------|---------|-------------|
 | [monolith](#monolith) | 5 | Core server tools (discover, status, update, reindex, guide) |
 | [blueprint](#blueprint) | 111 | Blueprint read/write, variable/component/graph CRUD, node ops, compile, auto-layout, spawn actors, dataset read/edit pack (DataTable/CurveTable/StringTable + `seed_data_asset`), cross-class property access, parent-function overrides |
-| [material](#material) | 63 | Material graph editing, inspection, CRUD, material functions, PBR pipeline |
+| [material](#material) | 65 | Material graph editing, inspection, CRUD, material functions, PBR pipeline |
 | [animation](#animation) | 145 | Curves, bone tracks, sync markers, root motion, compression, blend spaces (incl. baking + interpolation control), ABPs (incl. an AnimGraph-authoring pack — additive/slot/cached-pose/blend (by int + by enum)/sync/layered-blend/Control Rig/linked-layer/conduit nodes + output wiring — ABP-native animation layer graphs, custom anim-graph nodes + state-machine teardown + compound expression transition rules), montages, skeletons, PoseSearch, IKRig, Control Rig |
 | [niagara](#niagara) | 119 | Niagara VFX (emitters, modules, params, renderers, HLSL, dynamic inputs, event handlers, sim stages, effect types, event-aware summaries + validate_system event-chain reasoning, temporal-control composite writers + read aggregators, stateless-emitter factory) |
 | [editor](#editor) | 29 | Live Coding builds, compile output capture, editor logs, scene capture, texture import, map creation, module status, automation test list/run, Python escape-hatch, persistent-level swap |
@@ -344,7 +344,7 @@ See `Plugins/Monolith/Docs/specs/SPEC_MonolithBlueprint.md` for the deep dive.
 
 ## material
 
-Material graph editing, inspection, CRUD, material functions, instances, custom HLSL nodes, PBR pipeline. **63 actions.**
+Material graph editing, inspection, CRUD, material functions, instances, custom HLSL nodes, PBR pipeline. **65 actions.**
 
 > For full param schemas, call `describe_query("action_schema", target_namespace="material", target_action="<name>")` (or `monolith_discover("material", detail=true)`). Plain `monolith_discover("material")` is terse — names + one-line descriptions only.
 
@@ -364,6 +364,16 @@ Material graph editing, inspection, CRUD, material functions, instances, custom 
 | Layers | 1 | `get_layer_info` |
 | Batch | 2 | `batch_set_material_property`, `batch_recompile` |
 | Transactions | 2 | `begin_transaction`, `end_transaction` |
+| Clipboard delivery | 2 | `copy_material_nodes`, `recopy_last_material_nodes` |
+
+### Material node clipboard delivery
+
+`copy_material_nodes` prepares and compiles a node group in transient graphs,
+round-trips native UE graph text and writes it to Windows clipboard.
+`recopy_last_material_nodes` restores the last successful delivery from this UE
+session. Neither action changes the destination material. See
+[MaterialClipboard.md](MaterialClipboard.md) for schemas, sample bindings,
+failure behavior and the Highlight Lookup UV template.
 
 ### `build_material_graph` gotcha
 

@@ -115,11 +115,14 @@ namespace
 			EnsureTicker();
 		}
 
-		// Queue a repeated input injection. RepeatFrames of <= 1 means the handler already did
-		// the single injection; nothing is queued. RepeatFrames > 1 queues (RepeatFrames - 1)
-		// additional per-frame injections.
+		// Latest request replaces the previous hold for this player/action. A one-shot
+		// zero must cancel an earlier hold rather than being overwritten next tick.
 		void SetInputHold(int32 PlayerIndex, const UInputAction* Action, const FInputActionValue& Value, int32 ExtraFrames)
 		{
+			HeldInputs.RemoveAll([PlayerIndex, Action](const FHeldInput& Existing)
+			{
+				return Existing.PlayerIndex == PlayerIndex && Existing.Action.Get() == Action;
+			});
 			if (!Action || ExtraFrames <= 0)
 			{
 				return;
@@ -473,6 +476,7 @@ void FMonolithPieInputActions::RegisterActions(FMonolithToolRegistry& Registry)
 		     "input_action is a UInputAction asset path (/Game/...) or short asset name (registry-resolved; first match wins). "
 		     "value maps to FInputActionValue by JSON shape: bool -> Boolean, number -> Axis1D, array[2] -> Axis2D, array[3] -> Axis3D. "
 		     "Optional player_index (default 0); repeat_frames (default 1) re-injects the value each frame for that many frames. "
+		     "A new request replaces any queued hold for that same player/action, including a one-shot zero to release it. "
 		     "No-ops with a clean error when PIE is not running or the action asset cannot be resolved."),
 		FMonolithActionHandler::CreateStatic(&HandleInjectInputAction),
 		FParamSchemaBuilder()
@@ -611,10 +615,7 @@ FMonolithActionResult FMonolithPieInputActions::HandleInjectInputAction(const TS
 
 	// Inject once now; queue any additional per-frame injections.
 	Subsystem->InjectInputForAction(Action, ActionValue, {}, {});
-	if (RepeatFrames > 1)
-	{
-		FPieInputHoldRegistry::Get().SetInputHold(PlayerIndex, Action, ActionValue, RepeatFrames - 1);
-	}
+	FPieInputHoldRegistry::Get().SetInputHold(PlayerIndex, Action, ActionValue, RepeatFrames - 1);
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("input_action"), Action->GetPathName());

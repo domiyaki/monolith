@@ -29,16 +29,9 @@ FMonolithActionResult FProjectFindByTypeAction::Execute(const TSharedPtr<FJsonOb
 		return FMonolithActionResult::Error(TEXT("Index subsystem not available"));
 	}
 
-	TArray<FIndexedAsset> Assets = Subsystem->FindByType(AssetClass, Limit, Offset);
-
-	if (!ModuleFilter.IsEmpty())
-	{
-		Assets.RemoveAll([&ModuleFilter](const FIndexedAsset& A) { return A.ModuleName != ModuleFilter; });
-		if (Assets.Num() > Limit)
-		{
-			Assets.SetNum(Limit);
-		}
-	}
+	// Filter in the database BEFORE pagination: filtering a page afterwards can
+	// report an empty page even when matching assets exist later in the index.
+	TArray<FIndexedAsset> Assets = Subsystem->FindByType(AssetClass, Limit, Offset, ModuleFilter);
 
 	auto Result = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> AssetsArr;

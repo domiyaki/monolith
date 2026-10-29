@@ -18,22 +18,24 @@ Requirements: Python 3.8+ (stdlib only, no pip install needed)
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
+import math
 import os
 import sys
 import threading
 import time
 import tempfile
-import urllib.error
-import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from io import TextIOWrapper
 from pathlib import Path
+from monolith_editor_recovery import RECOVERY, append_tool
 
-MONOLITH_URL = os.environ.get("MONOLITH_URL", "http://localhost:9316/mcp")
+MONOLITH_URL = os.environ.get("MONOLITH_URL", "http://127.0.0.1:9316/mcp")
 MONOLITH_HEALTH = MONOLITH_URL.replace("/mcp", "/health")
 PROXY_NAME = "monolith-proxy"
-PROXY_VERSION = "1.1.1"
+PROXY_VERSION = "1.4.0-local-discovery"
 TIMEOUT = 30.0
 POLL_INTERVAL = 5.0
 POLL_START_DELAY = 3.0
@@ -41,6 +43,28 @@ POLL_START_DELAY = 3.0
 # Track Monolith availability for list_changed notifications
 _monolith_was_up = None
 _stdout_lock = threading.Lock()
+
+
+def _tools_cache_ttl_from_env() -> float:
+    try:
+        value = float(os.environ.get("MONOLITH_TOOLS_CACHE_TTL_SECONDS", "5"))
+        return max(0.0, min(60.0, value)) if math.isfinite(value) else 5.0
+    except ValueError:
+        return 5.0
+
+
+TOOLS_CACHE_TTL_SECONDS = _tools_cache_ttl_from_env()
+_tools_memory_lock = threading.Lock()
+_tools_generation = 0
+_tools_memory_result = None
+_tools_memory_generation = -1
+_tools_memory_expires = 0.0
+
+
+def _invalidate_tools_memory() -> None:
+    global _tools_generation
+    with _tools_memory_lock:
+        _tools_generation += 1
 
 # Call-log state (Phase 4 / survivor F)
 #
@@ -233,19 +257,91 @@ def _write_call_log_line(msg: dict, resp: str | None, duration_ms: float) -> Non
         _log(f"Call-log write failed: {e}")
 
 
-def _post_monolith(body: str, timeout: float = TIMEOUT) -> str | None:
-    """POST JSON-RPC to Monolith. Returns response body or None on failure."""
+_transport = threading.local()
+
+
+def _close_http_channel(channel: str) -> None:
+    channels = getattr(_transport, "channels", {})
+    entry = channels.pop(channel, None)
+    if entry:
+        entry[1].close()
+
+
+def _request_http(channel: str, method: str, url: str, timeout: float,
+                  body: bytes | None = None) -> tuple[int, bytes]:
+    """Reuse a connection per thread/channel; never replay a failed request.
+
+    http.client performs no redirect following or POST retry. Separate health
+    and RPC channels keep a health timeout from interrupting an active write.
+    Timeouts are socket-operation timeouts, not a whole-request deadline.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Monolith URL must use http or https with a host")
+    key = (parsed.scheme, parsed.hostname, parsed.port)
+    if not hasattr(_transport, "channels"):
+        _transport.channels = {}
+    entry = _transport.channels.get(channel)
+    if entry is None or entry[0] != key:
+        _close_http_channel(channel)
+        factory = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        connection = factory(parsed.hostname, parsed.port, timeout=timeout)
+        _transport.channels[channel] = (key, connection)
+    else:
+        connection = entry[1]
+        connection.timeout = timeout
+        if connection.sock is not None:
+            connection.sock.settimeout(timeout)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
     try:
-        req = urllib.request.Request(
-            MONOLITH_URL,
-            data=body.encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8")
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        _log(f"Monolith unreachable: {e}")
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        connection.request(method, target, body=body, headers=headers)
+        response = connection.getresponse()
+        if not 200 <= response.status < 300:
+            # An error/redirect body can stall independently of its headers.
+            # Discard this connection instead of waiting to drain that body.
+            status = response.status
+            _close_http_channel(channel)
+            return status, b""
+        # A complete read is necessary before reuse; IncompleteRead is a failure.
+        payload = response.read()
+        return response.status, payload
+    except Exception:
+        _close_http_channel(channel)
+        raise
+
+
+def _post_monolith(body: str, timeout: float = TIMEOUT) -> str | None:
+    """Return a validated JSON-RPC response, or None with a thread-local reason."""
+    _transport.post_error = ""
+    try:
+        request = json.loads(body)
+        status, raw = _request_http("rpc", "POST", MONOLITH_URL, timeout, body.encode("utf-8"))
+        if "id" not in request and 200 <= status < 300 and not raw:
+            return None  # JSON-RPC notifications do not have a response.
+        if status != 200:
+            raise ValueError(f"HTTP status {status}; redirects are not followed")
+        text = raw.decode("utf-8")
+        response = json.loads(text)
+        if (not isinstance(response, dict) or response.get("jsonrpc") != "2.0"
+                or "id" not in response or type(response["id"]) is not type(request.get("id"))
+                or response["id"] != request.get("id")
+                or ("result" in response) == ("error" in response)):
+            raise ValueError("Invalid JSON-RPC response envelope or mismatched response id")
+        if "error" in response:
+            error = response["error"]
+            if (not isinstance(error, dict) or type(error.get("code")) is not int
+                    or not isinstance(error.get("message"), str)):
+                raise ValueError("Invalid JSON-RPC error object")
+        elif request.get("method") in ("tools/call", "tools/list") and not isinstance(response["result"], dict):
+            raise ValueError("Invalid MCP result: expected an object")
+        return text
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        _close_http_channel("rpc")
+        _transport.post_error = f"{type(e).__name__}: {e}"
+        _log(f"Monolith request failed: {_transport.post_error}")
         return None
 
 
@@ -433,7 +529,10 @@ def _write_tools_cache(resp: str) -> None:
         payload = json.loads(resp)
         tools = payload.get("result", {}).get("tools", [])
         if isinstance(tools, list) and tools:
-            _tools_cache_path().write_text(json.dumps(tools), encoding="utf-8")
+            path = _tools_cache_path()
+            serialized = json.dumps(tools)
+            if not path.exists() or path.read_text(encoding="utf-8") != serialized:
+                path.write_text(serialized, encoding="utf-8")
     except Exception as e:
         _log(f"Failed to write tools/list cache: {e}")
 
@@ -455,18 +554,17 @@ def _fallback_tools_list(msg: dict) -> str:
     cached = _read_tools_cache()
     if cached:
         _log("Monolith down during tools/list — returning cached tools")
-        return _result(msg.get("id"), {"tools": cached})
+        return _result(msg.get("id"), {"tools": append_tool(cached)})
 
     _log("Monolith down during tools/list — returning seed tools")
-    return _result(msg.get("id"), {"tools": _seed_tools()})
+    return _result(msg.get("id"), {"tools": append_tool(_seed_tools())})
 
 
 def _check_monolith_up() -> bool:
     """Lightweight health check via GET /health endpoint."""
     try:
-        req = urllib.request.Request(MONOLITH_HEALTH, method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return resp.status == 200
+        status, _ = _request_http("health", "GET", MONOLITH_HEALTH, 3)
+        return status == 200
     except Exception:
         return False
 
@@ -487,6 +585,10 @@ def check_monolith_state_change(stdout) -> None:
     """Check for state transition and notify if changed."""
     global _monolith_was_up
     is_up = _check_monolith_up()
+    RECOVERY.tick(is_up)
+
+    if _monolith_was_up is None or is_up != _monolith_was_up:
+        _invalidate_tools_memory()
 
     if _monolith_was_up is not None and is_up != _monolith_was_up:
         direction = "online" if is_up else "offline"
@@ -532,7 +634,8 @@ def handle_initialize(msg: dict) -> str:
             "namespace's actions, and describe_query('action_schema', ...) returns an action's "
             "exact parameter schema. monolith_guide(section='recipes') gives cross-namespace "
             "workflows, decision matrices, and gotchas. "
-            "If tools return errors about the editor not running, wait and retry."
+            "Use proxy-local monolith_recovery to inspect or recover an offline editor. "
+            "After a timed-out mutation, inspect durable state before retrying the operation."
         ),
     })
 
@@ -542,20 +645,59 @@ def handle_ping(msg: dict) -> str:
 
 
 def handle_tools_list(msg: dict) -> str:
-    """Forward tools/list to Monolith. Stable cached/seed list if down."""
+    """Bound repeated discovery; refresh on expiry or editor availability changes."""
+    global _tools_memory_result, _tools_memory_generation, _tools_memory_expires
+    unpaginated = msg.get("params", {}) == {}
+    eligible = unpaginated and TOOLS_CACHE_TTL_SECONDS > 0
+    with _tools_memory_lock:
+        generation = _tools_generation
+        if (eligible and _tools_memory_result is not None
+                and _tools_memory_generation == generation
+                and time.monotonic() < _tools_memory_expires):
+            return _result(msg.get("id"), _tools_memory_result)
+
+    # HTTP stays outside the lock so the health poll can invalidate in-flight work.
     t0 = time.perf_counter()
     resp = _post_monolith(json.dumps(msg))
     duration_ms = (time.perf_counter() - t0) * 1000.0
     _write_call_log_line(msg, resp, duration_ms)
 
     if resp:
-        _write_tools_cache(resp)
+        payload = json.loads(resp)
+        result = payload.get("result")
+        valid = ("error" not in payload and isinstance(result, dict)
+                 and ("isError" not in result or result["isError"] is False)
+                 and isinstance(result.get("tools"), list)
+                 and all(isinstance(tool, dict) and isinstance(tool.get("name"), str)
+                         for tool in result["tools"]))
+        complete = valid and unpaginated and "nextCursor" not in result
+        if valid:
+            payload["result"]["tools"] = append_tool(payload["result"]["tools"])
+            resp = json.dumps(payload)
+        if complete:
+            _write_tools_cache(resp)
+            if eligible:
+                with _tools_memory_lock:
+                    if _tools_generation == generation:
+                        _tools_memory_result = payload["result"]
+                        _tools_memory_generation = generation
+                        _tools_memory_expires = time.monotonic() + TOOLS_CACHE_TTL_SECONDS
         return resp
     return _fallback_tools_list(msg)
 
 
 def handle_tools_call(msg: dict) -> str:
     """Forward tools/call to Monolith. Graceful error if down."""
+    if msg.get("params", {}).get("name") == "monolith_recovery":
+        args = msg.get("params", {}).get("arguments", {})
+        action = args.get("action")
+        if action not in ("status", "recover"):
+            return _tool_error(msg.get("id"), "monolith_recovery requires action status or recover")
+        if not isinstance(args.get("skip_restore", True), bool):
+            return _tool_error(msg.get("id"), "skip_restore must be a boolean")
+        healthy = _check_monolith_up()
+        result = RECOVERY.status(healthy) if action == "status" else RECOVERY.recover(healthy, args.get("skip_restore", True))
+        return _result(msg.get("id"), {"content": [{"type": "text", "text": json.dumps(result)}], "isError": not result.get("ok", False)})
     t0 = time.perf_counter()
     resp = _post_monolith(json.dumps(msg))
     duration_ms = (time.perf_counter() - t0) * 1000.0
@@ -566,8 +708,10 @@ def handle_tools_call(msg: dict) -> str:
     tool_name = msg.get("params", {}).get("name", "unknown")
     return _tool_error(
         msg.get("id"),
-        f"Monolith MCP is not available (Unreal Editor not running). "
-        f"Tool '{tool_name}' cannot execute. Start the editor and try again.",
+        f"Monolith response was not confirmed for tool '{tool_name}': "
+        f"{getattr(_transport, 'post_error', '')}. "
+        "The operation outcome may be unknown. The proxy did not replay the request. "
+        "Inspect editor status and durable state before retrying a mutation.",
     )
 
 
@@ -609,14 +753,13 @@ def main() -> None:
             _log("Initialized")
 
         elif method in ("notifications/initialized", "initialized"):
-            # Notification — no response. Check if Monolith is up.
-            check_monolith_state_change(stdout)
+            # Availability checks run on the background poller, keeping startup responsive.
+            pass
 
         elif method == "ping":
             response = handle_ping(msg)
 
         elif method == "tools/list":
-            check_monolith_state_change(stdout)
             response = handle_tools_list(msg)
 
         elif method == "tools/call":
@@ -632,7 +775,9 @@ def main() -> None:
             if resp:
                 response = resp
             elif msg_id is not None:
-                response = _jsonrpc_error(msg_id, -32601, f"Method not found: {method}")
+                response = _jsonrpc_error(msg_id, -32000,
+                    f"Monolith transport failed: {getattr(_transport, 'post_error', 'unknown error')}. "
+                    "The operation outcome may be unknown; no automatic replay was performed.")
 
         if response:
             _write(stdout, response)

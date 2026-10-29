@@ -12,7 +12,7 @@
 	"CanContainContent": false,
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
-	"Installed": false,
+	"Installed": true,
 	"EnabledByDefault": true,
 	"Plugins": [
 		{

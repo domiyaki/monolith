@@ -1,5 +1,48 @@
 # Monolith
 
+## domiyaki UE 5.8 fork
+
+This fork preserves [tumourlove/monolith](https://github.com/tumourlove/monolith)
+history and the original MIT license. The `ue5.8-custom` branch starts at upstream
+`v0.22.0` and contains the locally used UE 5.8 customization. It does not claim to
+include upstream `v0.24.0`. The original project description follows this section.
+
+The native and Python MCP proxies are version `1.4.0-local-discovery`. Changes
+include persistent HTTP transport, a nonblocking initialization notification,
+explicit IPv4 loopback by default, a bounded tools-list cache, editor recovery,
+and regression tests. Other customizations include Blueprint batch behavior,
+material editor synchronization, indexed queries, request-local source reads,
+editor navigation, and guarded asset operations.
+
+### Install and build
+
+Use a project-local installation at `<Project>/Plugins/Monolith` for this revision.
+Build the plugin with the project's Unreal Editor target. Build the native proxy
+from `Tools/MonolithProxy`; alternatively use `Scripts/monolith_proxy.py`.
+Configure the MCP client to run the proxy with a writable working directory and
+`MONOLITH_URL=http://127.0.0.1:9316/mcp`. Set an explicit endpoint for another editor
+instance. `MONOLITH_TOOLS_CACHE_TTL_SECONDS` defaults to 5, accepts 0 through 60,
+and disables the in-memory tools cache at 0.
+
+An engine-wide installation is not yet supported by this fork's validation.
+Some databases and running-state markers still live under the plugin directory;
+project-source indexing and project-only optional dependencies also need isolation.
+Sharing one plugin directory across projects could mix their index data. Keep the
+source repository separate from installed copies until those paths are migrated.
+
+### Validation and scope
+
+The local UE 5.8 integration ran 61 substantive UE automation tests successfully;
+three additional legacy tests could not exercise their source-index-dependent
+assertions. The proxy revision passed 43 regression test methods and four startup
+and offline-fallback checks. Recompile and test for your own engine build; no UE
+binaries, project assets, runtime databases, crash dumps, or local logs are shipped.
+
+Keep `upstream` pointed at tumourlove/monolith and `origin` at this fork. Review and
+merge future upstream changes explicitly rather than replacing the custom branch.
+
+---
+
 **One plugin. Every Unreal domain. Zero dependencies.**
 
 [![UE 5.7 / 5.8](https://img.shields.io/badge/Unreal-5.7%20%2F%205.8-blue)](https://unrealengine.com)
@@ -76,7 +119,7 @@ Project-instructions files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, etc.) vary
 
 Two zero-dependency C++ executables ship in `Binaries/` and work without the editor:
 
-- **`monolith_proxy.exe`** — MCP stdio↔HTTP proxy. Keeps your AI session alive across editor restarts. Used by the `.mcp.json` config above.
+- **`monolith_proxy.exe`** — MCP stdio↔HTTP proxy. Keeps your AI session alive across editor restarts. Used by the `.mcp.json` config above. Windows crash observation and the offline `monolith_recovery` tool are configured in [Editor recovery](Docs/EDITOR_RECOVERY.md).
 - **`monolith_query.exe`** — Offline query tool. Serves the engine source index, project asset index, and the full Reflection Intelligence surface (`decision` / `risk` / `cppreflect` / `network`) without launching UE — byte-identical to the live server, verified by a ship-blocking parity guard. Instant startup; useful for terminal-side lookups and CI when the editor is down.
 
 Details: [wiki Tool Reference](https://github.com/tumourlove/monolith/wiki/Tool-Reference).

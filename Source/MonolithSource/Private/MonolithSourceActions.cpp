@@ -5,6 +5,7 @@
 #include "MonolithParamSchema.h"
 #include "MonolithJsonUtils.h"
 #include "MonolithCursorCodec.h"
+#include "MonolithSourceRequestFileCache.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/FileHelper.h"
@@ -395,11 +396,14 @@ bool FMonolithSourceActions::ResolveFirstSignature(FMonolithSourceDatabase* DB, 
 	// Primary: declaration-read over source_fts.
 	const FString NeedlePattern = MethodName + TEXT("(");
 	TArray<FMonolithSourceChunk> Chunks = DB->SearchSourceFTS(Symbol, TEXT("all"), 50);
+	FMonolithSourceRequestFileCache FileCache(
+		[DB](int64 Id) { return DB->GetFilePath(Id); },
+		[](const FString& Path, TArray<FString>& Lines) { return FFileHelper::LoadFileToStringArray(Lines, *Path); });
 	for (const FMonolithSourceChunk& Chunk : Chunks)
 	{
-		const FString FilePath = DB->GetFilePath(Chunk.FileId);
-		TArray<FString> FileLines;
-		if (!FFileHelper::LoadFileToStringArray(FileLines, *FilePath)) continue;
+		const auto& File = FileCache.Get(Chunk.FileId);
+		if (!File.bLoaded) continue;
+		const TArray<FString>& FileLines = File.Lines;
 
 		const int32 WinStart = FMath::Max(0, Chunk.LineNumber - 1);
 		const int32 WinEnd = FMath::Min(FileLines.Num(), WinStart + 10);
@@ -448,11 +452,14 @@ bool FMonolithSourceActions::SymbolExists(FMonolithSourceDatabase* DB, const FSt
 	}
 	const FString NeedlePattern = MethodName + TEXT("(");
 	TArray<FMonolithSourceChunk> Chunks = DB->SearchSourceFTS(Symbol, TEXT("all"), 25);
+	FMonolithSourceRequestFileCache FileCache(
+		[DB](int64 Id) { return DB->GetFilePath(Id); },
+		[](const FString& Path, TArray<FString>& Lines) { return FFileHelper::LoadFileToStringArray(Lines, *Path); });
 	for (const FMonolithSourceChunk& Chunk : Chunks)
 	{
-		const FString FilePath = DB->GetFilePath(Chunk.FileId);
-		TArray<FString> FileLines;
-		if (!FFileHelper::LoadFileToStringArray(FileLines, *FilePath)) continue;
+		const auto& File = FileCache.Get(Chunk.FileId);
+		if (!File.bLoaded) continue;
+		const TArray<FString>& FileLines = File.Lines;
 		const int32 WinStart = FMath::Max(0, Chunk.LineNumber - 1);
 		const int32 WinEnd = FMath::Min(FileLines.Num(), WinStart + 10);
 		for (int32 i = WinStart; i < WinEnd; ++i)
@@ -994,12 +1001,6 @@ FMonolithActionResult FMonolithSourceActions::HandleSearchSource(const TSharedPt
 	// de-dup at the slice site continues to use the existing TSet<FString>
 	// keyed on (FileId, LineNumber).
 
-	FMonolithSourceDatabase* DB = GetDB();
-	if (!DB || !DB->IsOpen())
-	{
-		return FMonolithActionResult::Error(TEXT("Engine source DB not available."));
-	}
-
 	const FString Query = Params->GetStringField(TEXT("query"));
 	const FString Scope = Params->HasField(TEXT("scope")) ? Params->GetStringField(TEXT("scope")) : TEXT("all");
 	const int32 RequestedLimit = Params->HasField(TEXT("limit")) ? static_cast<int32>(Params->GetNumberField(TEXT("limit"))) : 20;
@@ -1054,6 +1055,14 @@ FMonolithActionResult FMonolithSourceActions::HandleSearchSource(const TSharedPt
 		SourcePage = State.SourcePage;
 		CachedTotalEstimate = State.CachedTotalEstimate;
 		bHasCursor = true;
+	}
+
+	// Cursor validation is independent of the database. Preserve INVALID_CURSOR
+	// for malformed or mismatched cursors even when the source DB is unavailable.
+	FMonolithSourceDatabase* DB = GetDB();
+	if (!DB || !DB->IsOpen())
+	{
+		return FMonolithActionResult::Error(TEXT("Engine source DB not available."));
 	}
 
 	const bool bIsPageZero = !bHasCursor;
@@ -1814,13 +1823,17 @@ FMonolithActionResult FMonolithSourceActions::HandleGetSignature(const TSharedPt
 		TArray<FMonolithSourceChunk> Chunks = DB->SearchSourceFTS(FtsQuery, TEXT("all"), 50);
 
 		TSet<FString> SeenSignatures;
+		FMonolithSourceRequestFileCache FileCache(
+			[DB](int64 Id) { return DB->GetFilePath(Id); },
+			[](const FString& Path, TArray<FString>& Lines) { return FFileHelper::LoadFileToStringArray(Lines, *Path); });
 		for (const FMonolithSourceChunk& Chunk : Chunks)
 		{
 			if (Overloads.Num() >= Limit) break;
 
-			const FString FilePath = DB->GetFilePath(Chunk.FileId);
-			TArray<FString> FileLines;
-			if (!FFileHelper::LoadFileToStringArray(FileLines, *FilePath)) continue;
+			const auto& File = FileCache.Get(Chunk.FileId);
+			if (!File.bLoaded) continue;
+			const FString& FilePath = File.Path;
+			const TArray<FString>& FileLines = File.Lines;
 
 			// The chunk's line_number is the 1-based first line of a 10-line batch.
 			// Scan the batch window for a declaration line containing `MethodName(`.
@@ -2184,11 +2197,15 @@ FMonolithActionResult FMonolithSourceActions::HandleFindExampleUsage(const TShar
 	TSet<FString> Seen;
 
 	TArray<FMonolithSourceChunk> Chunks = DB->SearchSourceFTS(Symbol, TEXT("all"), FTS_FETCH);
+	FMonolithSourceRequestFileCache FileCache(
+		[DB](int64 Id) { return DB->GetFilePath(Id); },
+		[](const FString& Path, TArray<FString>& Lines) { return FFileHelper::LoadFileToStringArray(Lines, *Path); });
 	for (const FMonolithSourceChunk& Chunk : Chunks)
 	{
-		const FString FilePath = DB->GetFilePath(Chunk.FileId);
-		TArray<FString> FileLines;
-		if (!FFileHelper::LoadFileToStringArray(FileLines, *FilePath)) continue;
+		const auto& File = FileCache.Get(Chunk.FileId);
+		if (!File.bLoaded) continue;
+		const FString& FilePath = File.Path;
+		const TArray<FString>& FileLines = File.Lines;
 
 		const int32 WinStart = FMath::Max(0, Chunk.LineNumber - 1);
 		const int32 WinEnd = FMath::Min(FileLines.Num(), WinStart + 10);

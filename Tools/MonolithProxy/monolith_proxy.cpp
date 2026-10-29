@@ -39,6 +39,8 @@
 #include <fstream>
 #include <vector>
 #include <iomanip>
+#include <atomic>
+#include <cmath>
 
 #include <nlohmann/json.hpp>
 
@@ -46,12 +48,14 @@
 
 using json = nlohmann::json;
 
+#include "EditorRecovery.h"
+
 // ============================================================================
 // Constants
 // ============================================================================
 
 static const char* PROXY_NAME    = "monolith-proxy";
-static const char* PROXY_VERSION = "1.1.1";
+static const char* PROXY_VERSION = "1.4.0-local-discovery";
 
 static constexpr double TIMEOUT                  = 30.0;
 static constexpr double POLL_INTERVAL            = 5.0;
@@ -98,6 +102,12 @@ static std::set<std::string> g_editor_action_denylist;
 static std::optional<bool> g_monolith_was_up; // nullopt = unknown
 static std::mutex g_stdout_lock;
 static std::unordered_map<std::string, double> g_recent_tool_calls;
+// Only the dispatcher owns the response cache. The poller invalidates by epoch.
+static std::atomic<uint64_t> g_tools_generation{0};
+static json g_tools_result;
+static uint64_t g_tools_result_generation = 0;
+static double g_tools_result_expires = 0.0;
+static double g_tools_cache_ttl = 5.0;
 
 // Call-log state (Phase 4 / survivor F)
 //
@@ -201,7 +211,7 @@ static void parse_monolith_url(const std::string& url)
     else
     {
         g_monolith_host = host_port;
-        g_monolith_port = 80;
+        g_monolith_port = url.rfind("https://", 0) == 0 ? 443 : 80;
     }
 
     // Derive health path: replace trailing /mcp with /health
@@ -560,113 +570,7 @@ static std::wstring to_wide(const std::string& s)
     return ws;
 }
 
-// POST JSON to Monolith. Returns response body or empty string on failure.
-static std::string post_monolith(const std::string& body, double timeout_sec = TIMEOUT)
-{
-    HINTERNET hSession = WinHttpOpen(
-        L"MonolithProxy/1.0",
-        WINHTTP_ACCESS_TYPE_NO_PROXY,
-        WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS,
-        0);
-    if (!hSession) return {};
-
-    std::wstring whost = to_wide(g_monolith_host);
-    HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), (INTERNET_PORT)g_monolith_port, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return {}; }
-
-    std::wstring wpath = to_wide(g_monolith_path_mcp);
-    HINTERNET hRequest = WinHttpOpenRequest(
-        hConnect, L"POST", wpath.c_str(),
-        nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return {}; }
-
-    // Set timeouts (milliseconds)
-    DWORD timeout_ms = (DWORD)(timeout_sec * 1000);
-    WinHttpSetTimeouts(hRequest, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-
-    // Send
-    const wchar_t* hdrs = L"Content-Type: application/json";
-    BOOL ok = WinHttpSendRequest(
-        hRequest, hdrs, (DWORD)-1,
-        (LPVOID)body.c_str(), (DWORD)body.size(),
-        (DWORD)body.size(), 0);
-
-    if (!ok || !WinHttpReceiveResponse(hRequest, nullptr))
-    {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return {};
-    }
-
-    // Read response
-    std::string response;
-    DWORD bytesAvailable = 0;
-    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0)
-    {
-        std::string chunk(bytesAvailable, '\0');
-        DWORD bytesRead = 0;
-        WinHttpReadData(hRequest, &chunk[0], bytesAvailable, &bytesRead);
-        response.append(chunk.c_str(), bytesRead);
-    }
-
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-
-    return response;
-}
-
-// GET health endpoint. Returns true if 200 OK.
-static bool check_monolith_up()
-{
-    HINTERNET hSession = WinHttpOpen(
-        L"MonolithProxy/1.0",
-        WINHTTP_ACCESS_TYPE_NO_PROXY,
-        WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS,
-        0);
-    if (!hSession) return false;
-
-    std::wstring whost = to_wide(g_monolith_host);
-    HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), (INTERNET_PORT)g_monolith_port, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
-
-    std::wstring wpath = to_wide(g_monolith_path_health);
-    HINTERNET hRequest = WinHttpOpenRequest(
-        hConnect, L"GET", wpath.c_str(),
-        nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
-
-    // 3-second timeout for health check
-    DWORD timeout_ms = 3000;
-    WinHttpSetTimeouts(hRequest, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-
-    BOOL ok = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                  WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (!ok || !WinHttpReceiveResponse(hRequest, nullptr))
-    {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return false;
-    }
-
-    DWORD statusCode = 0;
-    DWORD statusSize = sizeof(statusCode);
-    WinHttpQueryHeaders(hRequest,
-        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
-
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-
-    return statusCode == 200;
-}
+#include "HttpTransport.h"
 
 // ============================================================================
 // JSON-RPC helpers
@@ -904,9 +808,14 @@ static void write_tools_cache(const std::string& response)
         if (tools_it == result_it->end() || !tools_it->is_array() || tools_it->empty())
             return;
 
+        const std::string serialized = tools_it->dump();
+        std::ifstream existing(tools_cache_path(), std::ios::binary);
+        if (existing && std::string(std::istreambuf_iterator<char>(existing), {}) == serialized)
+            return;
+        existing.close();
         std::ofstream out(tools_cache_path(), std::ios::binary | std::ios::trunc);
         if (out)
-            out << tools_it->dump();
+            out << serialized;
     }
     catch (const std::exception& e)
     {
@@ -941,11 +850,14 @@ static std::string make_fallback_tools_list_response(const json& msg)
     if (auto cached = read_tools_cache())
     {
         log_msg("Monolith down during tools/list -- returning cached tools");
+        editor_recovery::append_tool(*cached);
         return make_result(msg.value("id", json()), {{"tools", cached.value()}});
     }
 
     log_msg("Monolith down during tools/list -- returning seed tools");
-    return make_result(msg.value("id", json()), {{"tools", make_seed_tools()}});
+    json tools = make_seed_tools();
+    editor_recovery::append_tool(tools);
+    return make_result(msg.value("id", json()), {{"tools", tools}});
 }
 
 // ============================================================================
@@ -1025,6 +937,9 @@ static void check_monolith_state_change()
 {
     bool is_up = check_monolith_up();
 
+    if (!g_monolith_was_up.has_value() || is_up != g_monolith_was_up.value())
+        g_tools_generation.fetch_add(1);
+
     if (g_monolith_was_up.has_value() && is_up != g_monolith_was_up.value())
     {
         const char* direction = is_up ? "online" : "offline";
@@ -1047,6 +962,7 @@ static void health_poll_thread()
         try
         {
             check_monolith_state_change();
+            editor_recovery::manager().tick();
         }
         catch (...)
         {
@@ -1082,7 +998,8 @@ static std::string handle_initialize(const json& msg)
     result["serverInfo"] = {{"name", PROXY_NAME}, {"version", PROXY_VERSION}};
     result["instructions"] =
         "Monolith MCP proxy. Tools are forwarded to the Unreal Editor. "
-        "If tools return errors about the editor not running, wait and retry.";
+        "Use proxy-local monolith_recovery to inspect or recover an offline editor. "
+        "After a timed-out mutation, inspect durable state before retrying the operation.";
 
     return make_result(msg.value("id", json()), result);
 }
@@ -1094,6 +1011,14 @@ static std::string handle_ping(const json& msg)
 
 static std::string handle_tools_list(const json& msg)
 {
+    const auto params_it = msg.find("params");
+    const bool cacheable_request = params_it == msg.end() ||
+        (params_it->is_object() && params_it->empty());
+    const uint64_t generation = g_tools_generation.load();
+    if (cacheable_request && g_tools_cache_ttl > 0.0 && g_tools_result.is_object() &&
+        g_tools_result_generation == generation && now_seconds() < g_tools_result_expires)
+        return make_result(msg.value("id", json()), g_tools_result);
+
     double t0 = now_seconds();
     std::string resp = post_monolith(msg.dump());
     double duration_ms = (now_seconds() - t0) * 1000.0;
@@ -1148,7 +1073,34 @@ static std::string handle_tools_list(const json& msg)
                 log_msg(std::string("Failed to rewrite tools/list response: ") + e.what());
             }
         }
-        write_tools_cache(resp);
+        try {
+            json payload = json::parse(resp);
+            if (payload.contains("result") && payload["result"].contains("tools") && payload["result"]["tools"].is_array()) {
+                editor_recovery::append_tool(payload["result"]["tools"]);
+                resp = payload.dump();
+            }
+        } catch (const std::exception& error) { log_msg(std::string("Recovery tool advertisement failed: ") + error.what()); }
+        try {
+            const json payload = json::parse(resp);
+            const auto result = payload.find("result");
+            const bool valid = !payload.contains("error") && result != payload.end() &&
+                result->is_object() && result->contains("tools") && (*result)["tools"].is_array() &&
+                std::all_of((*result)["tools"].begin(), (*result)["tools"].end(), [](const json& tool) {
+                    return tool.is_object() && tool.contains("name") && tool["name"].is_string();
+                }) &&
+                !result->contains("nextCursor") &&
+                (!result->contains("isError") || (*result)["isError"] == false);
+            if (valid && cacheable_request) {
+                write_tools_cache(resp);
+                if (g_tools_cache_ttl > 0.0 && generation == g_tools_generation.load()) {
+                    g_tools_result = *result;
+                    g_tools_result_generation = generation;
+                    g_tools_result_expires = now_seconds() + g_tools_cache_ttl;
+                }
+            }
+        } catch (const std::exception& error) {
+            log_msg(std::string("Tools response cache skipped: ") + error.what());
+        }
         return resp;
     }
 
@@ -1165,6 +1117,13 @@ static std::string handle_tools_call(const json& msg)
     std::string forwarded_name = tool_name;
     json args = params.value("arguments", json::object());
     if (args.is_null()) args = json::object();
+
+    if (tool_name == "monolith_recovery") {
+        try {
+            json state = editor_recovery::manager().call(args);
+            return make_result(id, {{"content", json::array({{{"type", "text"}, {"text", state.dump()}}})}, {"isError", state.contains("configuration_error") && !state["configuration_error"].get<std::string>().empty()}});
+        } catch (const std::exception& error) { return make_tool_error(id, error.what()); }
+    }
 
     // --- Split editor_query handling ---
     if (tool_name == "editor_read_query" || tool_name == "editor_build_query")
@@ -1287,8 +1246,9 @@ static std::string handle_tools_call(const json& msg)
         return resp;
 
     return make_tool_error(id,
-        "Monolith MCP is not available (Unreal Editor not running). "
-        "Tool '" + tool_name + "' cannot execute. Start the editor and try again.");
+        "Monolith HTTP request failed: " + g_http_error + ". "
+        "The outcome of tool '" + tool_name + "' may be unknown. No automatic replay was performed. "
+        "Use monolith_recovery status to inspect the editor, then query durable state before retrying a mutation.");
 }
 
 // ============================================================================
@@ -1302,8 +1262,15 @@ int main()
     _setmode(_fileno(stdout), _O_BINARY);
 
     // Parse configuration from environment
-    std::string url = get_env("MONOLITH_URL", "http://localhost:9316/mcp");
+    std::string url = get_env("MONOLITH_URL", "http://127.0.0.1:9316/mcp");
     parse_monolith_url(url);
+    try {
+        const std::string ttl = get_env("MONOLITH_TOOLS_CACHE_TTL_SECONDS", "5");
+        size_t consumed = 0;
+        const double value = std::stod(ttl, &consumed);
+        if (consumed == ttl.size() && std::isfinite(value))
+            g_tools_cache_ttl = std::clamp(value, 0.0, 60.0);
+    } catch (...) { /* Keep the bounded default for malformed configuration. */ }
 
     g_split_editor_query   = get_env("MONOLITH_SPLIT_EDITOR_QUERY", "0") == "1";
     g_editor_action_allowlist = parse_csv_env("MONOLITH_EDITOR_ACTION_ALLOWLIST");
@@ -1350,8 +1317,8 @@ int main()
         }
         else if (method == "notifications/initialized" || method == "initialized")
         {
-            // Notification -- no response. Check if Monolith is up.
-            check_monolith_state_change();
+            // Notification -- no response. The background poller owns health
+            // checks so initialization never waits for an HTTP health timeout.
         }
         else if (method == "ping")
         {
@@ -1359,7 +1326,6 @@ int main()
         }
         else if (method == "tools/list")
         {
-            check_monolith_state_change();
             response = handle_tools_list(msg);
         }
         else if (method == "tools/call")
@@ -1380,8 +1346,9 @@ int main()
             }
             else if (has_id)
             {
-                response = make_jsonrpc_error(msg["id"], -32601,
-                    "Method not found: " + method);
+                response = make_jsonrpc_error(msg["id"], -32000,
+                    "Monolith transport failed: " + g_http_error +
+                    ". The operation outcome may be unknown; no automatic replay was performed.");
             }
             // else: notification with no id, silently drop
         }

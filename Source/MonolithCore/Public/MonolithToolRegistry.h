@@ -129,6 +129,12 @@ public:
 	/** Get all actions in a namespace */
 	TArray<FMonolithActionInfo> GetActions(const FString& Namespace) const;
 
+	/** Exact lookup copied under lock. Clears OutInfo on a miss; no cache. */
+	bool TryGetActionInfo(const FString& Namespace, const FString& Action, FMonolithActionInfo& OutInfo) const;
+
+	/** Registered action names in the same order as GetActions, without copying descriptions/schemas. */
+	TArray<FString> GetActionNames(const FString& Namespace) const;
+
 	/** Get all actions across all namespaces */
 	TArray<FMonolithActionInfo> GetAllActions() const;
 

@@ -527,13 +527,11 @@ void ApplyResponseShaping(
 	// _fields whitelist — retain only matching top-level keys.
 	if (bHasFields)
 	{
-		TArray<FString> Existing;
-		for (const auto& KVP : Response->Values) { Existing.Add(MonolithKeyToString(KVP.Key)); }
-		for (const FString& K : Existing)
+		for (auto It = Response->Values.CreateIterator(); It; ++It)
 		{
-			if (!FieldsSet.Contains(K))
+			if (!FieldsSet.Contains(MonolithKeyToString(It.Key())))
 			{
-				Response->RemoveField(K);
+				It.RemoveCurrent();
 			}
 		}
 	}
@@ -566,14 +564,11 @@ void ApplyResponseShaping(
 	// _compact_json — drop top-level keys whose value is null/""/{}/[]. Runs AFTER fields/omit.
 	if (bCompact)
 	{
-		TArray<FString> Existing;
-		for (const auto& KVP : Response->Values) { Existing.Add(MonolithKeyToString(KVP.Key)); }
-		for (const FString& K : Existing)
+		for (auto It = Response->Values.CreateIterator(); It; ++It)
 		{
-			const TSharedPtr<FJsonValue> Val = Response->TryGetField(K);
-			if (MonolithResponseShapingDetail::IsEmptyForCompact(Val))
+			if (MonolithResponseShapingDetail::IsEmptyForCompact(It.Value()))
 			{
-				Response->RemoveField(K);
+				It.RemoveCurrent();
 			}
 		}
 	}

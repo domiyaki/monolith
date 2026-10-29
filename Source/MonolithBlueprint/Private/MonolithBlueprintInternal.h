@@ -35,6 +35,49 @@
 
 namespace MonolithBlueprintInternal
 {
+	// Request-local reuse only. Never cache generated classes, graphs, nodes or pins:
+	// structural edits can replace them while the UBlueprint asset remains valid.
+	class FScopedBlueprintReuse
+	{
+	public:
+		FScopedBlueprintReuse(const FString& InPath, UBlueprint* InBlueprint)
+			: Path(InPath), Blueprint(InBlueprint), Previous(Current())
+		{
+			check(IsInGameThread());
+			Current() = this;
+		}
+		~FScopedBlueprintReuse() { Current() = Previous; }
+		FScopedBlueprintReuse(const FScopedBlueprintReuse&) = delete;
+		FScopedBlueprintReuse& operator=(const FScopedBlueprintReuse&) = delete;
+		static UBlueprint* Find(const FString& InPath)
+		{
+			FScopedBlueprintReuse* Scope = Current();
+			if (Scope && Scope->Path == InPath)
+			{
+				return Scope->Blueprint.Get();
+			}
+			return nullptr;
+		}
+	private:
+		static FScopedBlueprintReuse*& Current()
+		{
+			static thread_local FScopedBlueprintReuse* Scope = nullptr;
+			return Scope;
+		}
+		FString Path;
+		TWeakObjectPtr<UBlueprint> Blueprint;
+		FScopedBlueprintReuse* Previous;
+	};
+
+	// Transport success only means the compiler ran; its payload reports compilation.
+	inline bool DidCompileSucceed(const FMonolithActionResult& Result)
+	{
+		bool bCompiledSuccessfully = false;
+		return Result.bSuccess && Result.Result.IsValid()
+			&& Result.Result->TryGetBoolField(TEXT("success"), bCompiledSuccessfully)
+			&& bCompiledSuccessfully;
+	}
+
 	/**
 	 * Try to resolve a Level Blueprint from a level asset path.
 	 * Level Blueprints are ULevelScriptBlueprint sub-objects of ULevel,
@@ -78,6 +121,7 @@ namespace MonolithBlueprintInternal
 	{
 		OutAssetPath = Params->GetStringField(TEXT("asset_path"));
 		if (OutAssetPath.IsEmpty()) return nullptr;
+		if (UBlueprint* Reused = FScopedBlueprintReuse::Find(OutAssetPath)) return Reused;
 
 		// Try standard Blueprint asset load first
 		UBlueprint* BP = FMonolithAssetUtils::LoadAssetByPath<UBlueprint>(OutAssetPath);

@@ -488,15 +488,15 @@ FMonolithActionResult FMonolithCoreTools::HandleDiscover(const TSharedPtr<FJsonO
 		TArray<TSharedPtr<FJsonValue>> NsArray;
 		for (const FString& Ns : Namespaces)
 		{
-			TArray<FMonolithActionInfo> Actions = Registry.GetActions(Ns);
+			TArray<FString> Actions = Registry.GetActionNames(Ns);
 			TSharedPtr<FJsonObject> NsObj = MakeShared<FJsonObject>();
 			NsObj->SetStringField(TEXT("namespace"), Ns);
 			NsObj->SetNumberField(TEXT("action_count"), Actions.Num());
 
 			TArray<TSharedPtr<FJsonValue>> ActionNames;
-			for (const FMonolithActionInfo& ActionInfo : Actions)
+			for (const FString& ActionName : Actions)
 			{
-				ActionNames.Add(MakeShared<FJsonValueString>(ActionInfo.Action));
+				ActionNames.Add(MakeShared<FJsonValueString>(ActionName));
 			}
 			NsObj->SetArrayField(TEXT("actions"), ActionNames);
 			NsArray.Add(MakeShared<FJsonValueObject>(NsObj));

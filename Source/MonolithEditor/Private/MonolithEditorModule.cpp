@@ -1,5 +1,8 @@
 #include "MonolithEditorModule.h"
 #include "MonolithEditorActions.h"
+#include "MonolithEditorNavigationActions.h"
+#include "MonolithEditorGuideActions.h"
+#include "MonolithEditorWidgetProbeActions.h"
 #include "MonolithEditorMapActions.h"
 #include "MonolithPieObjectActions.h"
 #include "MonolithPieInputActions.h"
@@ -85,6 +88,9 @@ void FMonolithEditorModule::StartupModule()
 	GLog->AddOutputDevice(LogCapture);
 
 	FMonolithEditorActions::RegisterActions(LogCapture);
+	FMonolithEditorNavigationActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithEditorGuideActions::RegisterActions(FMonolithToolRegistry::Get());
+	FMonolithEditorWidgetProbeActions::RegisterActions(FMonolithToolRegistry::Get());
 	FMonolithEditorMapActions::RegisterActions(FMonolithToolRegistry::Get());  // F8: create_empty_map + get_module_status
 	// Gap 8: live-PIE object property read + function call (editor namespace).
 	FMonolithPieObjectActions::RegisterActions(FMonolithToolRegistry::Get());
@@ -199,6 +205,9 @@ void FMonolithEditorModule::OnPostSlateModal()
 
 void FMonolithEditorModule::ShutdownModule()
 {
+	FMonolithEditorWidgetProbeActions::Shutdown();
+	FMonolithEditorGuideActions::Shutdown();
+	FMonolithEditorNavigationActions::Shutdown();
 #if WITH_EDITOR
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8
 	if (PreSlateModalHandle.IsValid())

@@ -1,0 +1,78 @@
+{
+  "summary": "高光 Lookup 原始正向 UV；接到现有高光纹理的 UV 输入。",
+  "graph_spec": {
+    "custom_hlsl_nodes": [
+      {
+        "id": "HighlightLookupUV",
+        "pos": [
+          0,
+          0
+        ],
+        "description": "Highlight Lookup UV (raw positive axes)",
+        "code": "float t2 = dot(StrandDirectionWS, StrandDirectionWS);\nfloat v2 = dot(ViewDirectionWS, ViewDirectionWS);\nfloat l2 = dot(LightDirectionWS, LightDirectionWS);\nif (min(t2, min(v2, l2)) < 1e-8) return float2(0, 0);\nfloat3 T = StrandDirectionWS * rsqrt(t2);\nfloat3 V = ViewDirectionWS * rsqrt(v2);\nfloat3 H = LightDirectionWS * rsqrt(l2) + V;\nfloat h2 = dot(H, H);\nfloat along = saturate(abs(dot(T, V)));\nif (h2 < 1e-8) return float2(0, along * along);\nfloat th = dot(T, H * rsqrt(h2));\nreturn float2(sqrt(saturate(1 - th * th)) * MaskG, along * along);",
+        "output_type": "Float2",
+        "inputs": [
+          {
+            "name": "StrandDirectionWS"
+          },
+          {
+            "name": "ViewDirectionWS"
+          },
+          {
+            "name": "LightDirectionWS"
+          },
+          {
+            "name": "MaskG"
+          }
+        ]
+      }
+    ]
+  },
+  "external_inputs": [
+    {
+      "node": "HighlightLookupUV",
+      "pin": "StrandDirectionWS",
+      "name": "StrandDirectionWS",
+      "sample": [
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "node": "HighlightLookupUV",
+      "pin": "ViewDirectionWS",
+      "name": "ViewDirectionWS",
+      "sample": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "node": "HighlightLookupUV",
+      "pin": "LightDirectionWS",
+      "name": "LightDirectionWS",
+      "sample": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "node": "HighlightLookupUV",
+      "pin": "MaskG",
+      "name": "MaskG",
+      "sample": [
+        1
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "node": "HighlightLookupUV",
+      "pin": "",
+      "name": "LookupUV -> HighlightLookup.UVs"
+    }
+  ]
+}

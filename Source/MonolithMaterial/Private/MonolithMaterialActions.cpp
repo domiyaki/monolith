@@ -1,4 +1,5 @@
 #include "MonolithMaterialActions.h"
+#include "MonolithMaterialEditorSync.h"
 #include "MonolithToolRegistry.h"
 #include "MonolithParamSchema.h"
 #include "MonolithPackagePathValidator.h"
@@ -104,14 +105,14 @@ static FString NormalizeInputPinName(const FString& PinName)
 
 void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 {
-	Registry.RegisterAction(TEXT("material"), TEXT("get_all_expressions"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_all_expressions"),
 		TEXT("Get all expression nodes in a base material"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetAllExpressions),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Material asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_expression_details"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_expression_details"),
 		TEXT("Get full property reflection, inputs, and outputs for a single expression"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetExpressionDetails),
 		FParamSchemaBuilder()
@@ -119,14 +120,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("expression_name"), TEXT("string"), TEXT("Name of the expression node"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_full_connection_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_full_connection_graph"),
 		TEXT("Get the complete connection graph (all wires) of a material"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetFullConnectionGraph),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Material asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("disconnect_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("disconnect_expression"),
 		TEXT("Disconnect inputs or outputs on a named expression"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DisconnectExpression),
 		FParamSchemaBuilder()
@@ -138,7 +139,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("output_index"), TEXT("integer"), TEXT("Only disconnect connections using this output index"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("build_material_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("build_material_graph"),
 		TEXT("Build entire material graph from JSON spec in a single undo transaction"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BuildMaterialGraph),
 		FParamSchemaBuilder()
@@ -147,19 +148,19 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("clear_existing"), TEXT("bool"), TEXT("Clear existing expressions before building (default: true)"), TEXT("true"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("begin_transaction"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("begin_transaction"),
 		TEXT("Begin a named undo transaction for batching edits"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BeginTransaction),
 		FParamSchemaBuilder()
 			.Required(TEXT("transaction_name"), TEXT("string"), TEXT("Name for the undo transaction"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("end_transaction"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("end_transaction"),
 		TEXT("End the current undo transaction"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::EndTransaction),
 		MakeShared<FJsonObject>());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("export_material_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("export_material_graph"),
 		TEXT("Export complete material graph to JSON (round-trippable with build_material_graph)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ExportMaterialGraph),
 		FParamSchemaBuilder()
@@ -168,7 +169,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("include_positions"), TEXT("bool"), TEXT("Include node positions"), TEXT("true"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("import_material_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("import_material_graph"),
 		TEXT("Import material graph from JSON string. Mode: overwrite or merge"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ImportMaterialGraph),
 		FParamSchemaBuilder()
@@ -177,7 +178,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("mode"), TEXT("string"), TEXT("Import mode: overwrite or merge"), TEXT("overwrite"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("validate_material"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("validate_material"),
 		TEXT("Validate material graph health and optionally auto-fix issues"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ValidateMaterial),
 		FParamSchemaBuilder()
@@ -185,7 +186,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("fix_issues"), TEXT("bool"), TEXT("Auto-fix detected issues"), TEXT("false"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("render_preview"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("render_preview"),
 		TEXT("Render material preview to PNG file. Supports UV tiling to check repetition at scale."),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RenderPreview),
 		FParamSchemaBuilder()
@@ -195,7 +196,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("preview_mesh"), TEXT("string"), TEXT("Preview mesh shape: plane, sphere, cube (default: sphere)"), TEXT("sphere"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_thumbnail"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_thumbnail"),
 		TEXT("Get material thumbnail as base64-encoded PNG"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetThumbnail),
 		FParamSchemaBuilder()
@@ -204,7 +205,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("save_to_file"), TEXT("string"), TEXT("Optional file path to save PNG to disk"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("create_custom_hlsl_node"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("create_custom_hlsl_node"),
 		TEXT("Create a Custom HLSL expression node with inputs, outputs, and code"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateCustomHLSLNode),
 		FParamSchemaBuilder()
@@ -218,7 +219,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("additional_outputs"), TEXT("array"), TEXT("Array of additional output pin definitions"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_layer_info"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_layer_info"),
 		TEXT("Get Material Layer or Material Layer Blend info"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetLayerInfo),
 		FParamSchemaBuilder()
@@ -227,7 +228,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 2: Asset creation & properties ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("create_material"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("create_material"),
 		TEXT("Create a new empty material asset at the specified path"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateMaterial),
 		FParamSchemaBuilder()
@@ -238,7 +239,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("two_sided"), TEXT("bool"), TEXT("Enable two-sided rendering"), TEXT("false"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("create_material_instance"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("create_material_instance"),
 		TEXT("Create a material instance constant from a parent material"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateMaterialInstance),
 		FParamSchemaBuilder()
@@ -250,7 +251,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("static_switch_parameters"), TEXT("object"), TEXT("Map of static switch param name to bool value"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_material_property"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_material_property"),
 		TEXT("Set top-level material properties (blend mode, shading model, domain, two-sided, opacity mask clip, usage flags, etc.)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetMaterialProperty),
 		FParamSchemaBuilder()
@@ -274,7 +275,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("used_with_static_lighting"), TEXT("bool"), TEXT("Mark as used with static lighting"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("delete_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("delete_expression"),
 		TEXT("Delete a material expression node by name, cleaning up all connections"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DeleteExpression),
 		FParamSchemaBuilder()
@@ -284,14 +285,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 2B: Parameter management, recompile, duplicate ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_material_parameters"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_material_parameters"),
 		TEXT("List all parameters in a material or material instance with types, defaults, and groups"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetMaterialParameters),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Material or material instance asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_instance_parameter"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_instance_parameter"),
 		TEXT("Set a parameter override on an existing material instance"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetInstanceParameter),
 		FParamSchemaBuilder()
@@ -303,7 +304,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("switch_value"), TEXT("bool"), TEXT("Boolean for static switch parameters"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("recompile_material"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("recompile_material"),
 		TEXT("Force recompile a material and return success/failure"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RecompileMaterial),
 		FParamSchemaBuilder()
@@ -311,7 +312,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("include_stats"), TEXT("bool"), TEXT("If true, wait for compilation and return errors/instruction counts (default: false)"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("duplicate_material"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("duplicate_material"),
 		TEXT("Duplicate an existing material or material instance to a new path"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DuplicateMaterial),
 		FParamSchemaBuilder()
@@ -321,14 +322,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 2C: Advanced utilities ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_compilation_stats"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_compilation_stats"),
 		TEXT("Get shader compilation statistics: instruction count, texture samplers, errors"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetCompilationStats),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Material asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_expression_property"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_expression_property"),
 		TEXT("Set a property value on an existing material expression node"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetExpressionProperty),
 		FParamSchemaBuilder()
@@ -338,7 +339,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("value"), TEXT("string"), TEXT("Value as string (parsed via ImportText for complex types) or number"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("connect_expressions"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("connect_expressions"),
 		TEXT("Connect an expression output to another expression input or a material output property"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ConnectExpressions),
 		FParamSchemaBuilder()
@@ -352,7 +353,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 3: Free wins (graph utilities & inspection) ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("auto_layout"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("auto_layout"),
 		TEXT("Auto-layout all expression nodes in a material or material function graph"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::AutoLayout),
 		FParamSchemaBuilder()
@@ -363,7 +364,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 				TEXT("auto"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("duplicate_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("duplicate_expression"),
 		TEXT("Duplicate an expression node within the same material. Output connections are NOT duplicated (input connections are preserved)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DuplicateExpression),
 		FParamSchemaBuilder()
@@ -373,7 +374,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("offset_y"), TEXT("integer"), TEXT("Y offset from original position"), TEXT("50"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("list_expression_classes"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("list_expression_classes"),
 		TEXT("List all available material expression classes with pin counts. First call may take 1-2s (cached after)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ListExpressionClasses),
 		FParamSchemaBuilder()
@@ -381,7 +382,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("category"), TEXT("string"), TEXT("Filter by MenuCategories substring"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_expression_connections"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_expression_connections"),
 		TEXT("Get all input connections and output consumers for a single expression"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetExpressionConnections),
 		FParamSchemaBuilder()
@@ -389,7 +390,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("expression_name"), TEXT("string"), TEXT("Name of the expression"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("move_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("move_expression"),
 		TEXT("Move one or more expression nodes to new positions"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::MoveExpression),
 		FParamSchemaBuilder()
@@ -401,7 +402,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("expressions"), TEXT("array"), TEXT("Batch: array of {name, x, y} objects"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_material_properties"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_material_properties"),
 		TEXT("Get top-level material properties: blend mode, shading model, domain, usage flags, etc."),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetMaterialProperties),
 		FParamSchemaBuilder()
@@ -410,14 +411,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 4: Instance & property improvements ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_instance_parameters"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_instance_parameters"),
 		TEXT("Read all parameter overrides from a material instance, with override detection vs parent"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetInstanceParameters),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Material instance asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_instance_parameters"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_instance_parameters"),
 		TEXT("Set multiple parameter overrides on a material instance in one call (batch)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetInstanceParameters),
 		FParamSchemaBuilder()
@@ -425,7 +426,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("parameters"), TEXT("array"), TEXT("Array of {name, type (scalar/vector/texture/switch), value}"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_instance_parent"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_instance_parent"),
 		TEXT("Reparent a material instance to a new parent material, reporting lost/kept parameters"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetInstanceParent),
 		FParamSchemaBuilder()
@@ -433,7 +434,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("new_parent"), TEXT("string"), TEXT("Path to new parent material or material instance"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("clear_instance_parameter"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("clear_instance_parameter"),
 		TEXT("Remove a single parameter override (or all overrides) from a material instance"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ClearInstanceParameter),
 		FParamSchemaBuilder()
@@ -442,7 +443,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("parameter_type"), TEXT("string"), TEXT("scalar, vector, texture, switch, or all (default: all)"), TEXT("all"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("save_material"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("save_material"),
 		TEXT("Save a material or material instance asset to disk"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SaveMaterial),
 		FParamSchemaBuilder()
@@ -452,7 +453,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 5: Graph editing power ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("update_custom_hlsl_node"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("update_custom_hlsl_node"),
 		TEXT("Update fields on an existing Custom HLSL expression node (code, inputs, outputs, etc.)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::UpdateCustomHlslNode),
 		FParamSchemaBuilder()
@@ -467,7 +468,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("additional_defines"), TEXT("array"), TEXT("Array of {name, value} preprocessor defines"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("replace_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("replace_expression"),
 		TEXT("Replace an expression with a new one, preserving connections by pin name (index fallback with warnings)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ReplaceExpression),
 		FParamSchemaBuilder()
@@ -478,14 +479,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("preserve_connections"), TEXT("bool"), TEXT("Attempt to reconnect wires by pin name, then index fallback"), TEXT("true"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_expression_pin_info"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_expression_pin_info"),
 		TEXT("Get input and output pin info for a material expression class (without needing a material asset)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetExpressionPinInfo),
 		FParamSchemaBuilder()
 			.Required(TEXT("class_name"), TEXT("string"), TEXT("Expression class name (e.g. MaterialExpressionMultiply or Multiply)"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("rename_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("rename_expression"),
 		TEXT("Set the user-visible description/label on an expression node in the graph editor"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RenameExpression),
 		FParamSchemaBuilder()
@@ -494,7 +495,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("new_desc"), TEXT("string"), TEXT("New description text (visible label in graph editor)"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("list_material_instances"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("list_material_instances"),
 		TEXT("Find all material instances that reference a parent material (recursively walks the instance tree)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ListMaterialInstances),
 		FParamSchemaBuilder()
@@ -504,7 +505,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 6: Material Functions ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("create_material_function"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("create_material_function"),
 		TEXT("Create a new UMaterialFunction asset"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateMaterialFunction),
 		FParamSchemaBuilder()
@@ -515,7 +516,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("type"), TEXT("string"), TEXT("Function type: MaterialFunction (default), MaterialLayer, or MaterialLayerBlend"), TEXT("MaterialFunction"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("build_function_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("build_function_graph"),
 		TEXT("Build a material function graph from JSON spec — same schema as build_material_graph but with function inputs[] and outputs[] definitions"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BuildFunctionGraph),
 		FParamSchemaBuilder()
@@ -524,14 +525,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("clear_existing"), TEXT("bool"), TEXT("Clear existing expressions before building"), TEXT("false"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_function_info"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_function_info"),
 		TEXT("Get detailed info about a material function — inputs, outputs, description, categories, expressions"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetFunctionInfo),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Material function asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("export_function_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("export_function_graph"),
 		TEXT("Export complete material function graph to JSON (expressions, connections, inputs, outputs, properties)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ExportFunctionGraph),
 		FParamSchemaBuilder()
@@ -540,7 +541,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("include_positions"), TEXT("bool"), TEXT("Include editor node positions"), TEXT("true"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_function_metadata"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_function_metadata"),
 		TEXT("Update material function metadata (description, categories, library exposure)"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetFunctionMetadata),
 		FParamSchemaBuilder()
@@ -550,14 +551,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("library_categories"), TEXT("array"), TEXT("Library category strings"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("update_material_function"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("update_material_function"),
 		TEXT("Recompile material function and cascade changes to all referencing materials/instances"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::UpdateMaterialFunction),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("MaterialFunction or MaterialFunctionInstance asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("delete_function_expression"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("delete_function_expression"),
 		TEXT("Delete expression(s) from a material function"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DeleteFunctionExpression),
 		FParamSchemaBuilder()
@@ -567,7 +568,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 7: Batch & Advanced ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("batch_set_material_property"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("batch_set_material_property"),
 		TEXT("Set material properties on multiple materials in a single transaction"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BatchSetMaterialProperty),
 		FParamSchemaBuilder()
@@ -590,14 +591,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("cast_shadow_as_masked"), TEXT("bool"), TEXT("Cast shadow as masked"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("batch_recompile"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("batch_recompile"),
 		TEXT("Recompile multiple materials and return per-material instruction counts"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::BatchRecompile),
 		FParamSchemaBuilder()
 			.Required(TEXT("asset_paths"), TEXT("array"), TEXT("Array of material asset paths to recompile"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("import_texture"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("import_texture"),
 		TEXT("Import a texture from disk into the project content"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ImportTexture),
 		FParamSchemaBuilder()
@@ -611,7 +612,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("replace_existing"), TEXT("bool"), TEXT("Replace existing asset at dest_path"), TEXT("false"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("create_pbr_material_from_disk"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("create_pbr_material_from_disk"),
 		TEXT("Import PBR textures from disk, create material, build graph, and compile in one action. Handles decals via opacity_from_alpha"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreatePbrMaterialFromDisk),
 		FParamSchemaBuilder()
@@ -629,7 +630,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 9: Function instances ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("create_function_instance"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("create_function_instance"),
 		TEXT("Create a material function instance with parent and optional parameter overrides"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CreateFunctionInstance),
 		FParamSchemaBuilder()
@@ -641,7 +642,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("static_switch_overrides"), TEXT("object"), TEXT("Static switch overrides {name: bool}"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("set_function_instance_parameter"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("set_function_instance_parameter"),
 		TEXT("Set or update a parameter override on a material function instance"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::SetFunctionInstanceParameter),
 		FParamSchemaBuilder()
@@ -653,7 +654,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("switch_value"), TEXT("bool"), TEXT("Static switch value"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_function_instance_info"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_function_instance_info"),
 		TEXT("Get material function instance info including parent chain and parameter overrides"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetFunctionInstanceInfo),
 		FParamSchemaBuilder()
@@ -662,14 +663,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 10: Function utilities ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("layout_function_expressions"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("layout_function_expressions"),
 		TEXT("Auto-arrange expression layout in a material function"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::LayoutFunctionExpressions),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("MaterialFunction asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("rename_function_parameter_group"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("rename_function_parameter_group"),
 		TEXT("Rename a parameter group across all parameters in a material function"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::RenameFunctionParameterGroup),
 		FParamSchemaBuilder()
@@ -680,7 +681,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 
 	// --- Wave 11: Material expansion ---
 
-	Registry.RegisterAction(TEXT("material"), TEXT("clear_graph"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("clear_graph"),
 		TEXT("Remove all expressions from a material graph, optionally preserving parameter nodes"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::ClearGraph),
 		FParamSchemaBuilder()
@@ -688,7 +689,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Optional(TEXT("preserve_parameters"), TEXT("bool"), TEXT("Keep parameter expressions (ScalarParameter, VectorParameter, etc.)"), TEXT("false"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("delete_expressions"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("delete_expressions"),
 		TEXT("Delete multiple expression nodes by name in a single transaction"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::DeleteExpressions),
 		FParamSchemaBuilder()
@@ -696,14 +697,14 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.Required(TEXT("expression_names"), TEXT("array"), TEXT("Array of expression name strings to delete"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("get_texture_properties"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("get_texture_properties"),
 		TEXT("Get comprehensive texture properties including recommended sampler type for material use"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::GetTextureProperties),
 		FParamSchemaBuilder()
 			.RequiredAssetPath(TEXT("asset_path"), TEXT("Texture asset path"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("preview_texture"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("preview_texture"),
 		TEXT("Render texture preview to PNG and return texture metadata in one call"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::PreviewTexture),
 		FParamSchemaBuilder()
@@ -712,7 +713,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.OptionalDiskPath(TEXT("output_path"), TEXT("Custom output file path (default: Saved/Monolith/previews/)"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("preview_textures"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("preview_textures"),
 		TEXT("Render a contact sheet of multiple textures with metadata"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::PreviewTextures),
 		FParamSchemaBuilder()
@@ -721,7 +722,7 @@ void FMonolithMaterialActions::RegisterActions(FMonolithToolRegistry& Registry)
 			.OptionalDiskPath(TEXT("output_path"), TEXT("Custom output file path (default: Saved/Monolith/previews/)"))
 			.Build());
 
-	Registry.RegisterAction(TEXT("material"), TEXT("check_tiling_quality"),
+	MonolithMaterialEditorSync::RegisterAction(Registry, TEXT("material"), TEXT("check_tiling_quality"),
 		TEXT("Analyze material for tiling issues: missing anti-tiling, no macro variation, direct UV usage"),
 		FMonolithActionHandler::CreateStatic(&FMonolithMaterialActions::CheckTilingQuality),
 		FParamSchemaBuilder()
@@ -4580,7 +4581,9 @@ FMonolithActionResult FMonolithMaterialActions::GetInstanceParameters(const TSha
 		TArray<FGuid> SwitchGuids;
 		MIC->GetAllStaticSwitchParameterInfo(SwitchInfos, SwitchGuids);
 
-		// Also get parent values to detect overrides
+		// Snapshot once per read; copying the full parameter set for every switch
+		// creates avoidable allocations without changing during this query.
+		const FStaticParameterSet StaticParams = MIC->GetStaticParameters();
 		for (int32 i = 0; i < SwitchInfos.Num(); ++i)
 		{
 			bool Value = false;
@@ -4592,7 +4595,6 @@ FMonolithActionResult FMonolithMaterialActions::GetInstanceParameters(const TSha
 			// parent would incorrectly show is_overridden=false.
 			bool bIsOverridden = false;
 			{
-				FStaticParameterSet StaticParams = MIC->GetStaticParameters();
 				for (const FStaticSwitchParameter& SP : StaticParams.StaticSwitchParameters)
 				{
 					if (SP.ParameterInfo == SwitchInfos[i])
@@ -7618,6 +7620,9 @@ FMonolithActionResult FMonolithMaterialActions::BatchRecompile(const TSharedPtr<
 
 	TArray<TSharedPtr<FJsonValue>> ResultsArray;
 	int32 SuccessCount = 0;
+	// Instances can share a base material, and callers can repeat paths. Keep
+	// per-input results while compiling each resolved base only once per request.
+	TSet<UMaterial*> RecompiledMaterials;
 
 	for (const FString& AssetPath : AssetPaths)
 	{
@@ -7643,7 +7648,14 @@ FMonolithActionResult FMonolithMaterialActions::BatchRecompile(const TSharedPtr<
 			continue;
 		}
 
-		UMaterialEditingLibrary::RecompileMaterial(BaseMat);
+		const bool bAlreadyRecompiled = RecompiledMaterials.Contains(BaseMat);
+		if (!bAlreadyRecompiled)
+		{
+			UMaterialEditingLibrary::RecompileMaterial(BaseMat);
+			RecompiledMaterials.Add(BaseMat);
+		}
+		PerAssetResult->SetStringField(TEXT("base_material_path"), BaseMat->GetPathName());
+		PerAssetResult->SetBoolField(TEXT("reused_base_recompile"), bAlreadyRecompiled);
 
 		// Retrieve instruction counts after recompile
 		FMaterialStatistics Stats = UMaterialEditingLibrary::GetStatistics(MatInterface);
@@ -7658,6 +7670,7 @@ FMonolithActionResult FMonolithMaterialActions::BatchRecompile(const TSharedPtr<
 	auto ResultJson = MakeShared<FJsonObject>();
 	ResultJson->SetNumberField(TEXT("material_count"), AssetPaths.Num());
 	ResultJson->SetNumberField(TEXT("success_count"), SuccessCount);
+	ResultJson->SetNumberField(TEXT("recompile_count"), RecompiledMaterials.Num());
 	ResultJson->SetArrayField(TEXT("results"), ResultsArray);
 
 	return FMonolithActionResult::Success(ResultJson);

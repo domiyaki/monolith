@@ -106,6 +106,7 @@ public:
 	static FMonolithActionResult CheckTilingQuality(const TSharedPtr<FJsonObject>& Params);
 
 private:
+	friend class FMonolithMaterialClipboard;
 	/** Load a UMaterial from an asset path. Returns nullptr on failure. */
 	static UMaterial* LoadBaseMaterial(const FString& AssetPath);
 
